@@ -5,12 +5,14 @@ from typing import Any, Dict, List, Optional, Callable
 import time
 import traceback
 import threading
+import re
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import queue
+from pathlib import Path
 
-from ..core.domain import ProcessingResult, DatasetInfo
-from ..core.exceptions import MPIError, ParallelProcessingError
+from ..core.domain import ProcessingResult, DatasetInfo, BoundingBox
+from ..core.exceptions import MPIError, ParallelProcessingError, DataLoadError
 from ..core.interfaces import Logger
 
 try:
@@ -30,7 +32,10 @@ class WorkerBase(ABC):
         self._stats = {
             'tasks_completed': 0,
             'tasks_failed': 0,
-            'total_processing_time': 0.0
+            'total_processing_time': 0.0,
+            'datasets_processed': 0,
+            'flame_analyses_completed': 0,
+            'shock_analyses_completed': 0
         }
         self._lock = threading.Lock()
 
@@ -44,16 +49,49 @@ class WorkerBase(ABC):
         with self._lock:
             return self._stats.copy()
 
-    def _record_success(self, processing_time: float) -> None:
+    def _record_success(self, processing_time: float, result: ProcessingResult = None) -> None:
         """Record successful task completion."""
         with self._lock:
             self._stats['tasks_completed'] += 1
             self._stats['total_processing_time'] += processing_time
+            self._stats['datasets_processed'] += 1
+
+            # Track analysis types
+            if result:
+                if result.flame_data:
+                    self._stats['flame_analyses_completed'] += 1
+                if result.shock_data:
+                    self._stats['shock_analyses_completed'] += 1
 
     def _record_failure(self) -> None:
         """Record task failure."""
         with self._lock:
             self._stats['tasks_failed'] += 1
+
+    def _create_dataset_info(self, dataset_path: str) -> DatasetInfo:
+        """Create DatasetInfo for Pele plotfile."""
+        try:
+            path_obj = Path(dataset_path)
+
+            # Extract plt number for timestamp estimation
+            match = re.search(r'plt(\d+)', path_obj.name)
+            plt_number = int(match.group(1)) if match else 0
+            estimated_time = plt_number * 1e-6  # Rough estimate
+
+            # Basic bounds (will be updated by actual data loader)
+            bounds = BoundingBox(0.0, 0.1, 0.0, 0.05)  # Typical Pele domain
+
+            return DatasetInfo(
+                path=path_obj,
+                basename=path_obj.name,
+                timestamp=estimated_time,
+                domain_bounds=bounds,
+                max_refinement_level=2,  # Default
+                grid_spacing=1e-5  # Default
+            )
+        except Exception:
+            # Fallback for any parsing issues
+            return DatasetInfo.from_path(dataset_path)
 
     def _log_info(self, message: str) -> None:
         if self.logger:
@@ -83,17 +121,35 @@ class MPIWorker(WorkerBase):
         start_time = time.time()
 
         try:
-            self._log_info(f"Processing: {work_item}")
+            # Validate dataset path exists
+            path_obj = Path(work_item)
+            if not path_obj.exists():
+                raise DataLoadError(work_item, "Dataset directory does not exist")
+
+            if not path_obj.is_dir():
+                raise DataLoadError(work_item, "Dataset path is not a directory")
+
+            self._log_info(f"Processing: {path_obj.name}")
             result = processor_func(work_item)
 
             processing_time = time.time() - start_time
-            self._record_success(processing_time)
 
             if result and result.is_successful():
-                self._log_info(f"Successfully processed {work_item} in {processing_time:.2f}s")
+                self._record_success(processing_time, result)
+
+                # Log analysis results
+                analysis_info = []
+                if result.flame_data and result.flame_data.position:
+                    analysis_info.append(f"flame@{result.flame_data.position:.3e}m")
+                if result.shock_data and result.shock_data.position:
+                    analysis_info.append(f"shock@{result.shock_data.position:.3e}m")
+
+                analysis_str = ", ".join(analysis_info) if analysis_info else "basic"
+                self._log_info(f"Successfully processed {path_obj.name} ({analysis_str}) in {processing_time:.2f}s")
             else:
-                self._log_error(f"Processing failed for {work_item}")
                 self._record_failure()
+                error_msg = result.error_message if result else "Unknown error"
+                self._log_error(f"Processing failed for {path_obj.name}: {error_msg}")
 
             return result
 
@@ -106,7 +162,7 @@ class MPIWorker(WorkerBase):
             self._log_error(f"Traceback: {traceback.format_exc()}")
 
             return ProcessingResult(
-                dataset_info=DatasetInfo.from_path(work_item),
+                dataset_info=self._create_dataset_info(work_item),
                 success=False,
                 error_message=str(e),
                 processing_time=processing_time
@@ -137,17 +193,19 @@ class ThreadWorker(WorkerBase):
         start_time = time.time()
 
         try:
-            self._log_info(f"Processing: {work_item}")
+            path_obj = Path(work_item)
+            self._log_info(f"Processing: {path_obj.name}")
+
             result = processor_func(work_item)
 
             processing_time = time.time() - start_time
-            self._record_success(processing_time)
 
             if result and result.is_successful():
-                self._log_info(f"Successfully processed {work_item} in {processing_time:.2f}s")
+                self._record_success(processing_time, result)
+                self._log_info(f"Successfully processed {path_obj.name} in {processing_time:.2f}s")
             else:
-                self._log_error(f"Processing failed for {work_item}")
                 self._record_failure()
+                self._log_error(f"Processing failed for {path_obj.name}")
 
             return result
 
@@ -159,7 +217,7 @@ class ThreadWorker(WorkerBase):
             self._log_error(error_msg)
 
             return ProcessingResult(
-                dataset_info=DatasetInfo.from_path(work_item),
+                dataset_info=self._create_dataset_info(work_item),
                 success=False,
                 error_message=str(e),
                 processing_time=processing_time
@@ -180,17 +238,19 @@ class ProcessWorker(WorkerBase):
         start_time = time.time()
 
         try:
-            self._log_info(f"Processing: {work_item}")
+            path_obj = Path(work_item)
+            self._log_info(f"Processing: {path_obj.name}")
+
             result = processor_func(work_item)
 
             processing_time = time.time() - start_time
-            self._record_success(processing_time)
 
             if result and result.is_successful():
-                self._log_info(f"Successfully processed {work_item} in {processing_time:.2f}s")
+                self._record_success(processing_time, result)
+                self._log_info(f"Successfully processed {path_obj.name} in {processing_time:.2f}s")
             else:
-                self._log_error(f"Processing failed for {work_item}")
                 self._record_failure()
+                self._log_error(f"Processing failed for {path_obj.name}")
 
             return result
 
@@ -202,7 +262,7 @@ class ProcessWorker(WorkerBase):
             self._log_error(error_msg)
 
             return ProcessingResult(
-                dataset_info=DatasetInfo.from_path(work_item),
+                dataset_info=self._create_dataset_info(work_item),
                 success=False,
                 error_message=str(e),
                 processing_time=processing_time
@@ -260,14 +320,18 @@ class WorkerManager:
         total_completed = sum(w.get_statistics()['tasks_completed'] for w in self.workers)
         total_failed = sum(w.get_statistics()['tasks_failed'] for w in self.workers)
         total_time = sum(w.get_statistics()['total_processing_time'] for w in self.workers)
+        total_flame_analyses = sum(w.get_statistics()['flame_analyses_completed'] for w in self.workers)
+        total_shock_analyses = sum(w.get_statistics()['shock_analyses_completed'] for w in self.workers)
 
         return {
             'total_tasks_completed': total_completed,
             'total_tasks_failed': total_failed,
             'total_processing_time': total_time,
-            'success_rate': total_completed / (total_completed + total_failed) if (
-                                                                                              total_completed + total_failed) > 0 else 0,
+            'success_rate': total_completed / (total_completed + total_failed) if (total_completed + total_failed) > 0 else 0,
             'average_task_time': total_time / total_completed if total_completed > 0 else 0,
+            'flame_analyses_completed': total_flame_analyses,
+            'shock_analyses_completed': total_shock_analyses,
+            'datasets_per_second': total_completed / total_time if total_time > 0 else 0
         }
 
 
