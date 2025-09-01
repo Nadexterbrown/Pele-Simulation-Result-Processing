@@ -1,7 +1,7 @@
 """
 Flame analysis for the Pele processing system.
 """
-from typing import Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 
 from ..core.interfaces import FlameAnalyzer, WaveTracker
@@ -15,6 +15,22 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
     def __init__(self, flame_temperature: float = 2500.0, transport_species: str = 'H2'):
         self.flame_temperature = flame_temperature
         self.transport_species = transport_species
+
+    def extract_flame_contour(self, dataset: Any) -> np.ndarray:
+        """Extract flame contour matching original implementation."""
+        try:
+            # Try YT contour extraction first
+            if hasattr(dataset, 'all_data'):
+                contours = dataset.all_data().extract_isocontours("Temp", self.flame_temperature)
+                if len(contours) > 0:
+                    return contours / 100  # Convert cm to m
+
+            # Fall back to manual extraction
+            return self._manual_contour_extraction(dataset)
+
+        except Exception:
+            # Manual extraction as fallback
+            return self._manual_contour_extraction(dataset)
 
     def sort_contour_by_nearest_neighbors(self, points: np.ndarray, dataset: Any) -> Tuple[np.ndarray, List[np.ndarray], float]:
         """Sort contour points using nearest neighbors matching original algorithm."""
@@ -97,20 +113,6 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
 
         total_length = np.sum(segment_length)
         return points[np.array(order)], segments, total_length
-        """Extract flame contour matching original implementation."""
-        try:
-            # Try YT contour extraction first
-            if hasattr(dataset, 'all_data'):
-                contours = dataset.all_data().extract_isocontours("Temp", self.flame_temperature)
-                if len(contours) > 0:
-                    return contours / 100  # Convert cm to m
-
-            # Fall back to manual extraction
-            return self._manual_contour_extraction(dataset)
-
-        except Exception:
-            # Manual extraction as fallback
-            return self._manual_contour_extraction(dataset)
 
     def _manual_contour_extraction(self, dataset: Any) -> np.ndarray:
         """Manual contour extraction matching original."""
@@ -159,42 +161,6 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             return contour_points / 100  # Convert cm to m
 
         return np.array([])
-
-    def find_wave_position(self, data: FieldData, wave_type: WaveType) -> Tuple[int, float]:
-        """Find flame position using temperature and species criteria."""
-        if wave_type != WaveType.FLAME:
-            raise WaveNotFoundError(wave_type.value, "Only flame detection supported")
-
-        # Primary criterion: temperature threshold
-        flame_indices = np.where(data.temperature >= self.flame_temperature)[0]
-
-        if len(flame_indices) == 0:
-            raise WaveNotFoundError("flame", f"No points above {self.flame_temperature}K")
-
-        # Use downstream-most point above threshold
-        temp_flame_idx = flame_indices[-1]
-
-        # Secondary validation with Y(HO2) species if available
-        if data.species_data and 'HO2' in data.species_data.mass_fractions:
-            species_flame_idx = np.argmax(data.species_data.mass_fractions['HO2'])
-
-            # Check agreement between methods
-            if abs(temp_flame_idx - species_flame_idx) > 10:
-                print(f'Warning: Flame Location differs by more than 10 cells!\n'
-                      f'Flame Temperature Location {data.coordinates[temp_flame_idx]}\n'
-                      f'Flame Species Location {data.coordinates[species_flame_idx]}')
-
-            flame_idx = species_flame_idx  # Prefer species-based detection
-        else:
-            flame_idx = temp_flame_idx
-
-        return flame_idx, data.coordinates[flame_idx]
-
-    def calculate_wave_velocity(self, positions: np.ndarray, times: np.ndarray) -> np.ndarray:
-        """Calculate flame velocity from position time series."""
-        if len(positions) < 2:
-            return np.array([])
-        return np.gradient(positions, times)
 
     def calculate_flame_thickness(self, dataset: Any, contour_points: Optional[np.ndarray],
                                  center_location: float) -> float:
@@ -293,24 +259,25 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         subgrid_flame_y = flame_y_arr[flame_y_arr_idx - subgrid_bin_size:flame_y_arr_idx + subgrid_bin_size + 1]
 
         # Create temperature grid
-        subgrid_temperatures = np.full((len(subgrid_flame_y), len(subgrid_flame_x)), np.nan)
+        temp_grid = np.full((len(subgrid_flame_y), len(subgrid_flame_x)), np.nan)
 
         for i, y in enumerate(subgrid_flame_y):
             for j, x in enumerate(subgrid_flame_x):
                 matching_indices = np.where((subgrid_x == x) & (subgrid_y == y))
                 if len(matching_indices[0]) > 0:
-                    subgrid_temperatures[i, j] = subgrid_temperatures[matching_indices[0][0]]
+                    temp_grid[i, j] = subgrid_temperatures[matching_indices[0][0]]
 
-        region_grid = np.dstack(np.meshgrid(subgrid_flame_x, subgrid_flame_y)).reshape(-1, 2)
-        region_temperature = subgrid_temperatures.reshape(np.meshgrid(subgrid_flame_x, subgrid_flame_y)[0].shape)
+        # Create meshgrid for coordinates
+        x_grid, y_grid = np.meshgrid(subgrid_flame_x, subgrid_flame_y)
+        region_grid = np.dstack((x_grid, y_grid)).reshape(-1, 2)
 
         # Create interpolator
         from scipy.interpolate import RegularGridInterpolator
         interpolator = RegularGridInterpolator(
-            (np.unique(region_grid[:, 0]), np.unique(region_grid[:, 1])),
-            region_temperature.T, bounds_error=False, fill_value=np.nan)
+            (subgrid_flame_y, subgrid_flame_x), temp_grid,
+            bounds_error=False, fill_value=np.nan)
 
-        return region_grid, region_temperature, interpolator
+        return region_grid, temp_grid, interpolator
 
     def _calculate_contour_normal(self, contour_points: np.ndarray) -> np.ndarray:
         """Calculate normal vectors for contour points matching original."""
@@ -368,52 +335,8 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             (line_points[:, 1] >= min_y) & (line_points[:, 1] <= max_y)
         ]
 
-    def analyze_flame_properties(self, dataset: Any, data: FieldData) -> FlameProperties:
-        """Complete flame analysis matching original flame_geometry function."""
-        # Find flame position from 1D data
-        flame_idx, flame_pos = self.find_wave_position(data, WaveType.FLAME)
+        return filtered_points  # Fixed: Added missing return statement
 
-        properties = FlameProperties(position=flame_pos, index=flame_idx)
-
-        # Extract 2D flame contour
-        try:
-            contour_points = self.extract_flame_contour(dataset)
-            if len(contour_points) > 0:
-                # Sort contour points (matching original algorithm)
-                sorted_points, segments, surface_length = self.sort_contour_by_nearest_neighbors(contour_points, dataset)
-
-                properties.surface_length = surface_length
-                properties.contour_points = sorted_points
-
-                # Calculate flame thickness if contour available
-                try:
-                    center_location = flame_pos  # Use 1D flame position as center
-                    properties.thickness = self.calculate_flame_thickness(dataset, sorted_points, center_location)
-                except Exception as e:
-                    print(f"Flame thickness calculation failed: {e}")
-                    properties.thickness = np.nan
-
-                # Calculate consumption rate
-                try:
-                    consumption_rate, burning_velocity = self.calculate_consumption_rate(
-                        dataset, sorted_points, self.transport_species)
-                    properties.consumption_rate = consumption_rate
-                    properties.burning_velocity = burning_velocity
-                except Exception as e:
-                    print(f"Consumption rate calculation failed: {e}")
-                    properties.consumption_rate = np.nan
-                    properties.burning_velocity = np.nan
-            else:
-                print("No flame contour found")
-                properties.surface_length = np.nan
-                properties.thickness = np.nan
-
-        except Exception as e:
-            print(f"2D flame analysis failed: {e}")
-            properties.surface_length = np.nan
-            properties.thickness = np.nan
-
-        return properties
 
     def _extract_flame_region_detailed(self, dataset: Any, flame_point: np.ndarray) -> Dict[str, np.ndarray]:
         """Extract detailed temperature field around flame point."""
@@ -624,6 +547,91 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         max_gradient = np.max(temp_gradient)
 
         return temp_rise / max_gradient  # Already in meters
+
+    def find_wave_position(self, data: FieldData, wave_type: WaveType) -> Tuple[int, float]:
+        """Find flame position using temperature and species criteria."""
+        if wave_type != WaveType.FLAME:
+            raise WaveNotFoundError(wave_type.value, "Only flame detection supported")
+
+        # Primary criterion: temperature threshold
+        flame_indices = np.where(data.temperature >= self.flame_temperature)[0]
+
+        if len(flame_indices) == 0:
+            raise WaveNotFoundError("flame", f"No points above {self.flame_temperature}K")
+
+        # Use downstream-most point above threshold
+        temp_flame_idx = flame_indices[-1]
+
+        # Secondary validation with Y(HO2) species if available
+        if data.species_data and 'HO2' in data.species_data.mass_fractions:
+            species_flame_idx = np.argmax(data.species_data.mass_fractions['HO2'])
+
+            # Check agreement between methods
+            if abs(temp_flame_idx - species_flame_idx) > 10:
+                print(f'Warning: Flame Location differs by more than 10 cells!\n'
+                      f'Flame Temperature Location {data.coordinates[temp_flame_idx]}\n'
+                      f'Flame Species Location {data.coordinates[species_flame_idx]}')
+
+            flame_idx = species_flame_idx  # Prefer species-based detection
+        else:
+            flame_idx = temp_flame_idx
+
+        return flame_idx, data.coordinates[flame_idx]
+
+
+    def calculate_wave_velocity(self, positions: np.ndarray, times: np.ndarray) -> np.ndarray:
+        """Calculate flame velocity from position time series."""
+        if len(positions) < 2:
+            return np.array([])
+        return np.gradient(positions, times)
+
+
+    def analyze_flame_properties(self, dataset: Any, data: FieldData) -> FlameProperties:
+        """Complete flame analysis matching original flame_geometry function."""
+        # Find flame position from 1D data
+        flame_idx, flame_pos = self.find_wave_position(data, WaveType.FLAME)
+
+        properties = FlameProperties(position=flame_pos, index=flame_idx)
+
+        # Extract 2D flame contour
+        try:
+            contour_points = self.extract_flame_contour(dataset)
+            if len(contour_points) > 0:
+                # Sort contour points (matching original algorithm)
+                sorted_points, segments, surface_length = self.sort_contour_by_nearest_neighbors(contour_points, dataset)
+
+                properties.surface_length = surface_length
+                properties.contour_points = sorted_points
+
+                # Calculate flame thickness if contour available
+                try:
+                    center_location = flame_pos  # Use 1D flame position as center
+                    properties.thickness = self.calculate_flame_thickness(dataset, sorted_points, center_location)
+                except Exception as e:
+                    print(f"Flame thickness calculation failed: {e}")
+                    properties.thickness = np.nan
+
+                # Calculate consumption rate
+                try:
+                    consumption_rate, burning_velocity = self.calculate_consumption_rate(
+                        dataset, sorted_points, self.transport_species)
+                    properties.consumption_rate = consumption_rate
+                    properties.burning_velocity = burning_velocity
+                except Exception as e:
+                    print(f"Consumption rate calculation failed: {e}")
+                    properties.consumption_rate = np.nan
+                    properties.burning_velocity = np.nan
+            else:
+                print("No flame contour found")
+                properties.surface_length = np.nan
+                properties.thickness = np.nan
+
+        except Exception as e:
+            print(f"2D flame analysis failed: {e}")
+            properties.surface_length = np.nan
+            properties.thickness = np.nan
+
+        return properties
 
 
 def create_flame_analyzer(flame_temperature: float = 2500.0, **kwargs) -> FlameAnalyzer:
