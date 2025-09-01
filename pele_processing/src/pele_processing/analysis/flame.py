@@ -16,29 +16,30 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         self.flame_temperature = flame_temperature
         self.transport_species = transport_species
 
-    def extract_flame_contour(self, dataset: Any) -> np.ndarray:
-        """Extract flame contour matching original implementation."""
+    def extract_flame_contour(self, dataset: Any, flame_pos: float = None) -> np.ndarray:
+        """Extract flame contour using YT parallel processing with fallbacks."""
+        # Try YT covering grid extraction first (fastest when flame_pos known)
         try:
-            # Try YT contour extraction first
-            if hasattr(dataset, 'all_data'):
-                contours = dataset.all_data().extract_isocontours("Temp", self.flame_temperature)
-                if len(contours) > 0:
-                    return contours / 100  # Convert cm to m
+            return self._extract_yt_contour(dataset, flame_pos)
+        except Exception as e:
+            print(f"YT extraction failed: {e}")
+            
+        # Fallback to local manual extraction around known flame position
+        try:
+            return self._extract_manual_contour(dataset, flame_pos)
+        except Exception as e:
+            print(f"Manual extraction failed: {e}")
+            return np.array([])
 
-            # Fall back to manual extraction
-            return self._manual_contour_extraction(dataset)
-
-        except Exception:
-            # Manual extraction as fallback
-            return self._manual_contour_extraction(dataset)
-
-    def sort_contour_by_nearest_neighbors(self, points: np.ndarray, dataset: Any) -> Tuple[np.ndarray, List[np.ndarray], float]:
-        """Sort contour points using nearest neighbors matching original algorithm."""
+    def sort_contour_by_nearest_neighbors(self, points: np.ndarray, dataset: Any) -> Tuple[
+        np.ndarray, List[np.ndarray], float]:
+        """Sort contour points using simple nearest neighbor approach."""
         if len(points) == 0:
             return points, [], 0.0
 
-        # Filter points within buffer zone (matching original)
-        buffer = 0.0075 * (dataset.domain_right_edge[1].to_value() - dataset.domain_left_edge[1].to_value()) / 100  # Convert to m
+        # Filter points within buffer zone
+        buffer = 0.0075 * (dataset.domain_right_edge[1].to_value() - dataset.domain_left_edge[
+            1].to_value()) / 100  # Convert to m
         domain_min = dataset.domain_left_edge[1].to_value() / 100 + buffer
         domain_max = dataset.domain_right_edge[1].to_value() / 100 - buffer
 
@@ -48,269 +49,556 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         if len(points) == 0:
             return points, [], 0.0
 
-        # Use cKDTree for efficient nearest neighbor search
-        from scipy.spatial import cKDTree
-        tree = cKDTree(points)
-
-        # Start from bottom-left point
-        origin_idx = np.argmin(np.lexsort((points[:, 0], points[:, 1])))
-        order = [origin_idx]
-        distance_arr = []
-        segments = []
-        segment_length = []
-        segment_start = 0
-
-        # Build ordered path
-        for i in range(1, len(points)):
-            distances, indices = tree.query(points[order[i - 1]], k=len(points))
-            for neighbor_idx in indices[1:]:  # Skip self
-                if neighbor_idx not in order:
-                    order.append(neighbor_idx)
-                    break
-
-            # Calculate distance to next point
-            distance = np.linalg.norm(points[order[i]] - points[order[i - 1]])
-            distance_arr.append(distance)
-
-            # Check for segment break (matching original threshold)
-            if distance > 50 * dataset.index.get_smallest_dx().to_value() / 100:  # Convert to m
-                segment = points[np.array(order[segment_start:i])]
-                segments.append(segment)
-                segment_length.append(np.sum(np.linalg.norm(np.diff(segment, axis=0), axis=1)))
-                segment_start = i
-
-        # Add final segment
-        if segment_start < len(order):
-            segment = points[np.array(order[segment_start:])]
-            segments.append(segment)
-            segment_length.append(np.sum(np.linalg.norm(np.diff(segment, axis=0), axis=1)))
-
-        # Fallback to sklearn if coverage is poor (matching original)
-        if len(segments) == 0 or len(np.concatenate(segments)) < 0.95 * len(points):
-            from sklearn.neighbors import NearestNeighbors
-            nbrs = NearestNeighbors(n_neighbors=len(points), algorithm='ball_tree').fit(points)
-            distances, indices = nbrs.kneighbors(points)
-
-            origin_idx = np.argmin(points[:, 1])
-            order = [origin_idx]
-            segments = []
-            segment_length = []
-            segment_start = 0
-
-            for i in range(1, len(points)):
-                temp_idx = np.argwhere(indices[:, 0] == order[i - 1])[0][0]
-                for neighbor_idx in indices[temp_idx, 1:]:
-                    if neighbor_idx not in order:
-                        order.append(neighbor_idx)
-                        break
-
-                distance = np.linalg.norm(points[order[i]] - points[order[i - 1]])
-                if distance > 50 * dataset.index.get_smallest_dx().to_value() / 100:
-                    segment = points[np.array(order[segment_start:i])]
-                    segments.append(segment)
-                    segment_length.append(np.sum(np.linalg.norm(np.diff(segment, axis=0), axis=1)))
-                    segment_start = i
-
-        total_length = np.sum(segment_length)
-        return points[np.array(order)], segments, total_length
-
-    def _manual_contour_extraction(self, dataset: Any) -> np.ndarray:
-        """Manual contour extraction matching original."""
-        from matplotlib.tri import Triangulation
-        import matplotlib.pyplot as plt
-        from scipy.interpolate import griddata
-
-        # Get maximum refinement level
-        max_level = dataset.index.max_level
-        x_coords, y_coords, temperatures = [], [], []
-
-        # Extract data from highest level grids
-        for grid in dataset.index.grids:
-            if grid.Level == max_level:
-                x_coords.append(grid["boxlib", "x"].to_value().flatten())
-                y_coords.append(grid["boxlib", "y"].to_value().flatten())
-                temperatures.append(grid["boxlib", "Temp"].flatten())
-
-        x_coords = np.concatenate(x_coords)
-        y_coords = np.concatenate(y_coords)
-        temperatures = np.concatenate(temperatures)
-
-        # Create triangulation
-        triangulation = Triangulation(x_coords, y_coords)
-        contour = plt.tricontour(triangulation, temperatures, levels=[self.flame_temperature])
-
-        # Extract contour points
-        if contour.collections:
-            paths = contour.collections[0].get_paths()
-            if paths:
-                contour_points = np.vstack([path.vertices for path in paths])
-                return contour_points / 100  # Convert cm to m
-
-        # If no contour found, try grid interpolation
-        xi = np.linspace(np.min(x_coords), np.max(x_coords), int(1e4))
-        yi = np.linspace(np.min(y_coords), np.max(y_coords), int(1e4))
-        xi_grid, yi_grid = np.meshgrid(xi, yi)
-
-        temperature_grid = griddata((x_coords, y_coords), temperatures, (xi_grid, yi_grid), method='cubic')
-        triangulation = Triangulation(xi_grid.flatten(), yi_grid.flatten())
-        contour = plt.tricontour(triangulation, temperature_grid.flatten(), levels=[self.flame_temperature])
-
-        if contour.collections:
-            paths = contour.collections[0].get_paths()
-            contour_points = np.vstack([path.vertices for path in paths])
-            return contour_points / 100  # Convert cm to m
-
-        return np.array([])
+        # Use simple nearest neighbor sorting
+        return self._sort_by_nearest_neighbors(points, dataset)
 
     def calculate_flame_thickness(self, dataset: Any, contour_points: Optional[np.ndarray],
                                  center_location: float) -> float:
-        """Calculate flame thickness matching original implementation."""
+        """Calculate flame thickness using original Pele-2D-Data-Processing method."""
         try:
             if contour_points is None or len(contour_points) == 0:
                 raise FlameAnalysisError("thickness", "No contour points provided")
 
-            # Find flame point closest to center location
-            flame_idx = np.argmin(np.abs(contour_points[:, 1] - center_location))
+            # Step 1: Extract the flame location from the contour 
+            flame_idx = np.argmin(abs(contour_points[:, 1] - center_location))
             flame_x, flame_y = contour_points[flame_idx]
 
-            # Extract simulation grid (matching original)
+            # Step 2: Extract simulation grid
             subgrid_x, subgrid_y, subgrid_temperatures = self._extract_simulation_grid(dataset, flame_x, flame_y)
 
-            # Create symmetric subgrid around flame point
+            # Step 3: Find the nearest index to the flame contour
+            flame_x_idx = np.argmin(np.abs(subgrid_x - flame_x))
+            flame_y_idx = np.argmin(np.abs(subgrid_y - flame_y))
+
+            flame_x_arr = subgrid_x[np.abs(subgrid_y - subgrid_y[flame_y_idx]) <= 1e-12]
+            flame_y_arr = subgrid_y[np.abs(subgrid_x - subgrid_x[flame_x_idx]) <= 1e-12]
+
+            flame_x_arr_idx = np.argmin(np.abs(flame_x_arr - flame_x))
+            flame_y_arr_idx = np.argmin(np.abs(flame_y_arr - flame_y))
+
+            # Step 4: Create subgrid
             region_grid, region_temperature, interpolator = self._create_subgrid(
-                subgrid_x, subgrid_y, subgrid_temperatures, flame_x, flame_y)
+                subgrid_x, subgrid_y, subgrid_temperatures, flame_x, flame_y, 
+                flame_x_arr, flame_y_arr, flame_x_arr_idx, flame_y_arr_idx)
 
-            # Calculate contour normal vectors
+            # Step 5: Calculate contour normal and normal line
             contour_normals = self._calculate_contour_normal(contour_points)
-
-            # Generate normal line through flame point
-            normal_line = self._calculate_normal_vector_line(
-                contour_normals[flame_idx], contour_points[flame_idx], region_grid)
-
-            # Interpolate temperature along normal
-            normal_distances = np.insert(np.cumsum(np.sqrt(np.sum(np.diff(normal_line, axis=0)**2, axis=1))), 0, 0)
-            normal_temperatures = interpolator(normal_line)
-
-            # Calculate thickness from temperature gradient
-            temp_grad = np.abs(np.gradient(normal_temperatures, normal_distances))
-
-            if len(temp_grad) == 0 or np.max(temp_grad) == 0:
-                return np.nan
-
-            thickness = (np.max(normal_temperatures) - np.min(normal_temperatures)) / np.max(temp_grad)
-            return thickness  # Already in meters
+            normal_line = self._calculate_normal_vector_line(contour_normals[flame_idx], region_grid)
+            
+            # Step 6: Calculate thickness using original method
+            normal_distances = np.insert(np.cumsum(np.sqrt(np.sum(np.diff(normal_line, axis=0) ** 2, axis=1))), 0, 0)
+            temp_grad = np.abs(np.gradient(interpolator(normal_line)) / np.gradient(normal_distances))
+            
+            flame_thickness_val = (np.max(interpolator(normal_line)) - np.min(interpolator(normal_line))) / np.max(temp_grad)
+            
+            return flame_thickness_val
 
         except Exception as e:
-            raise FlameAnalysisError("thickness", str(e))
+            print(f"Error: Unable to calculate flame thickness: {e}")
+            return np.nan
+
+    def _extract_yt_contour(self, dataset: Any, flame_pos: float = None) -> np.ndarray:
+        """Extract flame contour using YT's covering grid + extract_isocontours."""
+        import yt
+        
+        # Enable YT parallelism
+        try:
+            yt.enable_parallelism()
+        except:
+            pass  # Already enabled or mpi4py not available
+        
+        # Method 1: Smart box region extraction (focused around flame when known)
+        try:
+            domain_left = dataset.domain_left_edge.to_value()
+            domain_right = dataset.domain_right_edge.to_value()
+            
+            if flame_pos is not None:
+                # Create focused box region around flame (±5mm window)
+                flame_window = 5e-3  # 5mm in meters
+                flame_pos_cm = flame_pos * 100  # Convert to cm for YT
+                
+                # Create focused left/right edges (±5mm around flame)
+                focused_left = [
+                    max(domain_left[0], flame_pos_cm - flame_window * 100),  # Don't go outside domain
+                    domain_left[1],
+                    domain_left[2]
+                ]
+                focused_right = [
+                    min(domain_right[0], flame_pos_cm + flame_window * 100),
+                    domain_right[1], 
+                    domain_right[2]
+                ]
+                
+                print(f"Creating focused box region around flame at {flame_pos:.4f}m")
+                print(f"Box bounds: x=[{focused_left[0]:.1f}, {focused_right[0]:.1f}]cm, window: ±{flame_window*1000:.1f}mm")
+            else:
+                # Fallback to broader regional extraction (2.5% buffer from each end)
+                flame_buffer = 0.025
+                focused_left = [domain_left[0] + flame_buffer * (domain_right[0] - domain_left[0]), domain_left[1], domain_left[2]]
+                focused_right = [domain_right[0] - flame_buffer * (domain_right[0] - domain_left[0]), domain_right[1], domain_right[2]]
+                
+                print(f"Creating regional box region (no flame position known)")
+                print(f"Box bounds: x=[{focused_left[0]:.1f}, {focused_right[0]:.1f}]cm, 2.5% buffer")
+            
+            # Create box region and extract contours
+            box_region = dataset.box(left_edge=focused_left, right_edge=focused_right)
+            contours = box_region.extract_isocontours("Temp", self.flame_temperature)
+            
+            if len(contours) > 0:
+                contour_2d = contours[:, :2] / 100  # cm to m, drop z
+                valid_mask = np.isfinite(contour_2d).all(axis=1)
+                clean_contours = contour_2d[valid_mask]
+                
+                if len(clean_contours) > 0:
+                    method_type = "focused" if flame_pos is not None else "regional"
+                    print(f"Extracted {len(clean_contours)} contour points using {method_type} box region")
+                    return self._remove_duplicate_points(clean_contours)
+                        
+        except Exception as e:
+            print(f"Box region extraction failed: {e}")
+        
+        # Method 2: Full domain extraction
+        try:
+            if hasattr(dataset, 'all_data'):
+                print("Trying full domain isocontour extraction...")
+                contours = dataset.all_data().extract_isocontours("Temp", self.flame_temperature)
+                if len(contours) > 0:
+                    contour_2d = contours[:, :2] / 100  # Convert cm to m, drop z
+                    valid_mask = np.isfinite(contour_2d).all(axis=1)
+                    clean_contours = contour_2d[valid_mask]
+                    if len(clean_contours) > 0:
+                        print(f"Extracted {len(clean_contours)} contour points using full domain")
+                        return self._remove_duplicate_points(clean_contours)
+        except Exception as e:
+            print(f"Full domain isocontour extraction failed: {e}")
+        
+        
+        raise ValueError("All YT contour extraction methods failed")
+
+    def _extract_manual_contour(self, dataset: Any, flame_pos: float = None) -> np.ndarray:
+        """Manual contour extraction focused around known flame location."""
+        from concurrent.futures import ThreadPoolExecutor
+        from matplotlib.tri import Triangulation
+        import matplotlib.pyplot as plt
+        from scipy.interpolate import griddata
+        
+        max_level = dataset.index.max_level
+        
+        # Filter highest level grids by average x-distance from flame position
+        relevant_grids = []
+        for grid in dataset.index.grids:
+            if grid.Level == max_level:
+                if flame_pos is not None:
+                    # Calculate average x position of this grid (convert cm to m)
+                    grid_x_avg = (grid.LeftEdge[0].to_value() + grid.RightEdge[0].to_value()) / 200  # /200 = /2 then /100
+                    flame_distance = abs(grid_x_avg - flame_pos)
+                    
+                    # Only include grids within 5mm of flame position
+                    if flame_distance <= 5e-3:  # 5mm in meters
+                        relevant_grids.append(grid)
+                else:
+                    # If no flame position known, include all highest level grids
+                    relevant_grids.append(grid)
+        
+        total_grids = len([g for g in dataset.index.grids if g.Level == max_level])
+        if flame_pos is not None:
+            print(f"Filtering grids around flame at {flame_pos:.4f}m: using {len(relevant_grids)}/{total_grids} grids (within 5mm)")
+        else:
+            print(f"No flame position provided, using all {len(relevant_grids)} highest level grids")
+        
+        if len(relevant_grids) == 0:
+            raise ValueError(f"No relevant grids found around flame position {flame_pos}")
+        
+        def extract_grid_data(grid):
+            """Extract data from a single grid."""
+            try:
+                x = grid["boxlib", "x"].to_value().flatten()
+                y = grid["boxlib", "y"].to_value().flatten() 
+                temp = grid["boxlib", "Temp"].flatten()
+                return x, y, temp
+            except Exception:
+                return None, None, None
+        
+        # Use ThreadPoolExecutor for parallel grid data extraction
+        x_coords_list, y_coords_list, temperatures_list = [], [], []
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(extract_grid_data, relevant_grids))
+        
+        # Collect results
+        for x, y, temp in results:
+            if x is not None:
+                x_coords_list.append(x)
+                y_coords_list.append(y)
+                temperatures_list.append(temp)
+        
+        if not x_coords_list:
+            return np.array([])
+            
+        x_coords = np.concatenate(x_coords_list)
+        y_coords = np.concatenate(y_coords_list) 
+        temperatures = np.concatenate(temperatures_list)
+        
+        # Sample data if too large
+        if len(x_coords) > 100000:
+            indices = np.random.choice(len(x_coords), 100000, replace=False)
+            x_coords = x_coords[indices]
+            y_coords = y_coords[indices]
+            temperatures = temperatures[indices]
+        
+        # Create triangulation and extract contour
+        try:
+            triangulation = Triangulation(x_coords, y_coords)
+            contour = plt.tricontour(triangulation, temperatures, levels=[self.flame_temperature])
+            
+            # Extract paths from contour (newer matplotlib API)
+            paths = []
+            try:
+                # Try newer matplotlib API first
+                if hasattr(contour, 'get_paths'):
+                    paths = contour.get_paths()
+                elif hasattr(contour, 'collections') and contour.collections:
+                    # Fallback to older API
+                    paths = contour.collections[0].get_paths()
+                elif hasattr(contour, 'allsegs') and contour.allsegs:
+                    # Even older API - convert segments to paths
+                    from matplotlib.path import Path
+                    for level_segs in contour.allsegs:
+                        for seg in level_segs:
+                            if len(seg) > 0:
+                                paths.append(Path(seg))
+            except Exception as path_error:
+                print(f"Path extraction failed: {path_error}")
+                paths = []
+            
+            if paths:
+                contour_points = np.vstack([path.vertices for path in paths])
+                return contour_points / 100  # Convert cm to m
+                    
+        except Exception as e:
+            print(f"Triangulation failed, trying grid interpolation: {e}")
+            
+        # Final fallback: grid interpolation
+        try:
+            n_points = min(int(5e3), len(x_coords) // 10)
+            xi = np.linspace(np.min(x_coords), np.max(x_coords), n_points)
+            yi = np.linspace(np.min(y_coords), np.max(y_coords), n_points)
+            xi_grid, yi_grid = np.meshgrid(xi, yi)
+            
+            temperature_grid = griddata((x_coords, y_coords), temperatures, (xi_grid, yi_grid), method='linear')
+            temperature_grid = np.nan_to_num(temperature_grid, nan=np.min(temperatures))
+            
+            triangulation = Triangulation(xi_grid.flatten(), yi_grid.flatten())
+            contour = plt.tricontour(triangulation, temperature_grid.flatten(), levels=[self.flame_temperature])
+            
+            # Extract paths from contour (handle different matplotlib versions)
+            paths = []
+            try:
+                if hasattr(contour, 'get_paths'):
+                    paths = contour.get_paths()
+                elif hasattr(contour, 'collections') and contour.collections:
+                    paths = contour.collections[0].get_paths()
+                elif hasattr(contour, 'allsegs') and contour.allsegs:
+                    from matplotlib.path import Path
+                    for level_segs in contour.allsegs:
+                        for seg in level_segs:
+                            if len(seg) > 0:
+                                paths.append(Path(seg))
+            except Exception as path_error:
+                print(f"Grid interpolation path extraction failed: {path_error}")
+            
+            if paths:
+                contour_points = np.vstack([path.vertices for path in paths])
+                return contour_points / 100  # Convert cm to m
+        
+        except Exception as e:
+            print(f"Grid interpolation failed: {e}")
+            
+        return np.array([])
+
+
+    def _sort_by_nearest_neighbors(self, points: np.ndarray, dataset: Any) -> Tuple[
+        np.ndarray, List[np.ndarray], float]:
+        """Sort contour points using efficient nearest neighbor approach with segment breaking."""
+        if len(points) < 2:
+            return points, [points] if len(points) > 0 else [], 0.0
+        
+        from scipy.spatial import cKDTree
+        
+        # Calculate segment break distance threshold
+        max_segment_distance = 20 * dataset.index.get_smallest_dx().to_value() / 100  # Convert to m
+        
+        # Build spatial index for efficient nearest neighbor queries
+        tree = cKDTree(points)
+        
+        # Start from the leftmost point
+        start_idx = np.argmin(points[:, 0])
+        
+        # Track visited points efficiently using boolean array
+        visited = np.zeros(len(points), dtype=bool)
+        ordered_indices = []
+        segments = []
+        segment_start = 0
+        
+        current_idx = start_idx
+        visited[current_idx] = True
+        ordered_indices.append(current_idx)
+        
+        while len(ordered_indices) < len(points):
+            current_point = points[current_idx]
+            
+            # Find k nearest neighbors (k=min(20, remaining_points))
+            remaining_count = len(points) - len(ordered_indices)
+            k = min(20, remaining_count + 1)  # +1 because query includes current point
+            
+            distances, neighbor_indices = tree.query(current_point, k=k)
+            
+            # Find the nearest unvisited neighbor
+            nearest_idx = None
+            min_distance = float('inf')
+            
+            for dist, idx in zip(distances, neighbor_indices):
+                if not visited[idx] and dist < min_distance:
+                    nearest_idx = idx
+                    min_distance = dist
+            
+            # Fallback: if no neighbor found in k-nearest, search all unvisited
+            if nearest_idx is None:
+                unvisited_mask = ~visited
+                if np.any(unvisited_mask):
+                    unvisited_indices = np.where(unvisited_mask)[0]
+                    unvisited_points = points[unvisited_indices]
+                    distances_to_unvisited = np.linalg.norm(unvisited_points - current_point, axis=1)
+                    min_idx = np.argmin(distances_to_unvisited)
+                    nearest_idx = unvisited_indices[min_idx]
+                    min_distance = distances_to_unvisited[min_idx]
+            
+            if nearest_idx is None:
+                break  # All points visited
+            
+            # Check if we need to create a new segment
+            if min_distance > max_segment_distance and len(ordered_indices) > segment_start + 1:
+                # Create segment from segment_start to current position
+                segment_indices = ordered_indices[segment_start:]
+                segment_points = points[segment_indices]
+                segments.append(segment_points)
+                segment_start = len(ordered_indices)
+            
+            # Add point to path
+            visited[nearest_idx] = True
+            ordered_indices.append(nearest_idx)
+            current_idx = nearest_idx
+        
+        # Add final segment
+        if segment_start < len(ordered_indices):
+            segment_indices = ordered_indices[segment_start:]
+            segment_points = points[segment_indices]
+            segments.append(segment_points)
+        
+        # If no segments were created, treat all points as one segment
+        if not segments:
+            segments = [points[ordered_indices]]
+        
+        # Calculate total path length efficiently
+        ordered_points = points[ordered_indices]
+        total_length = 0.0
+        
+        for segment in segments:
+            if len(segment) > 1:
+                # Vectorized distance calculation
+                segment_vectors = np.diff(segment, axis=0)
+                segment_distances = np.linalg.norm(segment_vectors, axis=1)
+                total_length += np.sum(segment_distances)
+        
+        return ordered_points, segments, total_length
+
+
+    def _remove_duplicate_points(self, points: np.ndarray, tolerance: float = 1e-8) -> np.ndarray:
+        """Remove duplicate points within tolerance."""
+        if len(points) <= 1:
+            return points
+            
+        from scipy.spatial.distance import pdist, squareform
+        
+        try:
+            distances = pdist(points)
+            distance_matrix = squareform(distances)
+            
+            close_pairs = np.where((distance_matrix < tolerance) & (distance_matrix > 0))
+            
+            indices_to_remove = set()
+            for i, j in zip(close_pairs[0], close_pairs[1]):
+                if i < j:  # Only process each pair once
+                    indices_to_remove.add(j)
+            
+            keep_indices = [i for i in range(len(points)) if i not in indices_to_remove]
+            return points[keep_indices]
+            
+        except:
+            # Fallback to simple approach
+            unique_points = [points[0]]
+            
+            for point in points[1:]:
+                distances = np.linalg.norm(np.array(unique_points) - point, axis=1)
+                if np.min(distances) > tolerance:
+                    unique_points.append(point)
+            
+            return np.array(unique_points)
 
     def _extract_simulation_grid(self, dataset: Any, flame_x: float, flame_y: float):
-        """Extract simulation grid matching original algorithm."""
+        """Extract simulation grid using original method."""
+        # Step 1: Collect the max level grids
         max_level = dataset.index.max_level
         grids = [grid for grid in dataset.index.grids if grid.Level == max_level]
 
-        # Pre-extract grid data
+        # Step 2: Pre-allocate lists for subgrid data and filtered grids
+        subgrid_x, subgrid_y, subgrid_temperatures = [], [], []
+        filtered_grids = []
+
+        # Step 3: Pre-extract the grid data once for efficiency
         grid_data = []
-        for grid in grids:
-            x = grid["boxlib", "x"].to_value().flatten() / 100  # Convert to m
-            y = grid["boxlib", "y"].to_value().flatten() / 100
-            temp = grid["boxlib", "Temp"].flatten()
+        for temp_grid in grids:
+            x = temp_grid["boxlib", "x"].to_value().flatten()
+            y = temp_grid["boxlib", "y"].to_value().flatten()
+            temp = temp_grid["Temp"].flatten()
             grid_data.append((x, y, temp))
 
-        # Filter grids by mean x difference (matching original)
-        subgrid_x, subgrid_y, subgrid_temperatures = [], [], []
-
+        # Step 4: Filter grids based on mean x difference (original method)
         for i, (x, y, temp) in enumerate(grid_data):
+            # Calculate the mean x value for the current grid
             current_mean_x = np.mean(x)
-            if current_mean_x > flame_x + 1e-2:  # Skip if too far downstream
-                continue
+            if i < len(grids) - 1:
+                # If the difference in mean x values is too large, skip the current grid
+                if current_mean_x > flame_x * 100 + 1e-2:  # Convert flame_x to cm for comparison
+                    continue
 
+            # If this grid is not skipped, append it to the filtered list
+            filtered_grids.append(grids[i])
+            # Collect the values from this grid
             subgrid_x.extend(x)
             subgrid_y.extend(y)
             subgrid_temperatures.extend(temp)
 
-        return np.array(subgrid_x), np.array(subgrid_y), np.array(subgrid_temperatures)
+        # Convert to cm for consistency with original
+        subgrid_x = np.array(subgrid_x) / 100  # Convert to m
+        subgrid_y = np.array(subgrid_y) / 100  # Convert to m
+        subgrid_temperatures = np.array(subgrid_temperatures)
 
-    def _create_subgrid(self, subgrid_x, subgrid_y, subgrid_temperatures, flame_x, flame_y):
-        """Create symmetric subgrid around flame point matching original."""
-        # Find indices closest to flame position
-        flame_x_idx = np.argmin(np.abs(subgrid_x - flame_x))
-        flame_y_idx = np.argmin(np.abs(subgrid_y - flame_y))
+        return subgrid_x, subgrid_y, subgrid_temperatures
 
-        # Get arrays along flame position
-        flame_x_arr = subgrid_x[np.abs(subgrid_y - subgrid_y[flame_y_idx]) <= 1e-12]
-        flame_y_arr = subgrid_y[np.abs(subgrid_x - subgrid_x[flame_x_idx]) <= 1e-12]
-
-        flame_x_arr_idx = np.argmin(np.abs(flame_x_arr - flame_x))
-        flame_y_arr_idx = np.argmin(np.abs(flame_y_arr - flame_y))
-
-        # Determine subgrid size (matching original logic)
+    def _create_subgrid(self, subgrid_x, subgrid_y, subgrid_temperatures, flame_x, flame_y, 
+                       flame_x_arr, flame_y_arr, flame_x_arr_idx, flame_y_arr_idx):
+        """Create subgrid using original method."""
+        # Step 1: Determine the number of indices to the left and right of the flame_x_idx
         left_x_indices = flame_x_arr_idx
         right_x_indices = len(flame_x_arr) - flame_x_arr_idx - 1
+        # Determine the smallest number of cells for the x indices
         x_indices = min(left_x_indices, right_x_indices)
 
+        # Step 2: Determine the number of indices to the top and bottom of the flame_y_idx
         top_y_indices = flame_y_arr_idx
         bottom_y_indices = len(flame_y_arr) - flame_y_arr_idx - 1
+        # Determine the smallest number of cells for the y indices
         y_indices = min(top_y_indices, bottom_y_indices)
 
-        subgrid_bin_size = min(x_indices, y_indices, 11)
+        # Step 3: Determine the subgrid bin size
+        if min(x_indices, y_indices) < 11:
+            subgrid_bin_size = min(x_indices, y_indices)
+        else:
+            subgrid_bin_size = 11
 
-        # Create symmetric subgrid
+        # Step 4: Create subgrid with the appropriate number of indices on either side of flame_x_idx and flame_y_idx
         subgrid_flame_x = flame_x_arr[flame_x_arr_idx - subgrid_bin_size:flame_x_arr_idx + subgrid_bin_size + 1]
         subgrid_flame_y = flame_y_arr[flame_y_arr_idx - subgrid_bin_size:flame_y_arr_idx + subgrid_bin_size + 1]
 
-        # Create temperature grid
-        temp_grid = np.full((len(subgrid_flame_y), len(subgrid_flame_x)), np.nan)
+        # Step 5: Create a grid of temperature values corresponding to the subgrid (subgrid_flame_x, subgrid_flame_y)
+        subgrid_temperatures_grid = np.full((len(subgrid_flame_y), len(subgrid_flame_x)), np.nan)
 
+        # Step 6: Create a grid of temperature values corresponding to the subgrid (subgrid_flame_x, subgrid_flame_y)
+        # Iterate over the subgrid (x, y) pairs and find the corresponding temperature from the collective data
         for i, y in enumerate(subgrid_flame_y):
             for j, x in enumerate(subgrid_flame_x):
+                # Find the index in the collective data that corresponds to the current (x, y)
                 matching_indices = np.where((subgrid_x == x) & (subgrid_y == y))
+
                 if len(matching_indices[0]) > 0:
-                    temp_grid[i, j] = subgrid_temperatures[matching_indices[0][0]]
+                    # If a match is found, assign the temperature at the (x, y) position
+                    try:
+                        subgrid_temperatures_grid[i, j] = subgrid_temperatures[matching_indices[0][0]]
+                    except:
+                        subgrid_temperatures_grid[i, j] = np.nan
 
-        # Create meshgrid for coordinates
-        x_grid, y_grid = np.meshgrid(subgrid_flame_x, subgrid_flame_y)
-        region_grid = np.dstack((x_grid, y_grid)).reshape(-1, 2)
+        region_grid = np.dstack(np.meshgrid(subgrid_flame_x, subgrid_flame_y)).reshape(-1, 2)
+        region_temperature = subgrid_temperatures_grid.reshape(np.meshgrid(subgrid_flame_x, subgrid_flame_y)[0].shape)
 
-        # Create interpolator
+        # Original rotation/flipping logic to match grid orientation
         from scipy.interpolate import RegularGridInterpolator
-        interpolator = RegularGridInterpolator(
-            (subgrid_flame_y, subgrid_flame_x), temp_grid,
-            bounds_error=False, fill_value=np.nan)
+        
+        break_outer = False
+        for i in range(2):
+            if i == 0:
+                temp_arr = region_temperature
+            else:
+                temp_arr = np.flip(region_temperature, axis=i - 1)
 
-        return region_grid, temp_grid, interpolator
+            for j in range(4):
+                temp_grid = np.rot90(temp_arr, k=j)
+
+                # Compute alignment score (difference between grid and contour points)
+                interpolator = RegularGridInterpolator((np.unique(region_grid[:, 0]), np.unique(region_grid[:, 1])),
+                                                       temp_grid, bounds_error=False, fill_value=None)
+                contour_temps = interpolator(region_grid).reshape(
+                    np.meshgrid(subgrid_flame_x, subgrid_flame_y)[0].shape)
+
+                if np.all(contour_temps == region_temperature):
+                    break_outer = True
+                    break  # Break out of the inner loop
+
+            if break_outer:
+                break  # Break out of the outer loop
+
+        return region_grid, region_temperature, interpolator
 
     def _calculate_contour_normal(self, contour_points: np.ndarray) -> np.ndarray:
-        """Calculate normal vectors for contour points matching original."""
+        """Calculate contour normals using original method."""
+        # Step 1: Compute the gradient of the contour points
         dx = np.gradient(contour_points[:, 0])
         dy = np.gradient(contour_points[:, 1])
 
+        # Step 2: Compute the normals
         normals = np.zeros_like(contour_points)
+        # Case 1: If the contour is aligned with the x-axis, the normal should be along the y-axis
         for i in range(len(dx)):
-            if dx[i] == 0:  # Vertical contour
-                normals[i, 0] = 0
-                normals[i, 1] = 1
-            elif dy[i] == 0:  # Horizontal contour
-                normals[i, 0] = 1
-                normals[i, 1] = 0
-            else:  # General case - rotate tangent 90 degrees
-                normals[i, 0] = dy[i]
-                normals[i, 1] = -dx[i]
+            if (dx[i] == 0):  # No change in x-coordinates, thus the normal is along y-axis
+                normals[i, 0] = 0  # Normal along the y-axis (positive direction)
+                normals[i, 1] = 1  # No change in y for normal direction
 
-        # Normalize
-        norms = np.linalg.norm(normals, axis=1)
-        norms[norms == 0] = 1  # Avoid division by zero
-        normals = normals / norms[:, np.newaxis]
+            # Case 2: If the contour is aligned with the y-axis, the normal should be along the x-axis
+            elif (dy[i] == 0):  # No change in y-coordinates, normal should be along x-axis
+                normals[i, 0] = 1  # No change in x for normal direction
+                normals[i, 1] = 0  # Normal along the x-axis (positive direction)
+
+            # General case: Calculate the normal by rotating the tangent 90 degrees
+            else:
+                normals[i, 0] = dy[i]  # Rotate by 90 degrees
+                normals[i, 1] = -dx[i]  # Invert the x-component of the tangent
+
+        # Step 3: Normalize the normal vectors
+        normals = normals / np.linalg.norm(normals, axis=1)[:, np.newaxis]
 
         return normals
 
-    def _calculate_normal_vector_line(self, normal_vector: np.ndarray, center_point: np.ndarray, region_grid: np.ndarray):
-        """Calculate normal line points matching original algorithm."""
-        # Determine step size
+    def _calculate_normal_vector_line(self, normal_vector: np.ndarray, region_grid: np.ndarray):
+        """Calculate normal vector line using original method."""
+        # Step 1: Determine the spacing to be used for the normal vector
         dx = np.abs(np.unique(region_grid[:, 0])[1] - np.unique(region_grid[:, 0])[0])
         dy = np.abs(np.unique(region_grid[:, 1])[1] - np.unique(region_grid[:, 1])[0])
-        t_step = min(dx, dy) / np.linalg.norm(normal_vector)
+        t_step = min(dx, dy) / np.linalg.norm(normal_vector)  # Adjust step size for resolution
 
-        # Calculate bounds
+        # Center point of the array
+        center_point = region_grid[region_grid.shape[0] // 2]
+
+        # Step 2: Determine the bounds for the normal vector
         t_min_x = (np.min(region_grid[:, 0]) - center_point[0]) / normal_vector[0] if normal_vector[0] != 0 else -np.inf
         t_max_x = (np.max(region_grid[:, 0]) - center_point[0]) / normal_vector[0] if normal_vector[0] != 0 else np.inf
         t_min_y = (np.min(region_grid[:, 1]) - center_point[1]) / normal_vector[1] if normal_vector[1] != 0 else -np.inf
@@ -319,72 +607,23 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         t_start = max(min(t_min_x, t_max_x), min(t_min_y, t_max_y))
         t_end = min(max(t_min_x, t_max_x), max(t_min_y, t_max_y))
 
-        # Generate line points
-        t_range = np.arange(t_start, t_end, t_step / 100, dtype=np.float32)
-        line_points = np.column_stack([
-            center_point[0] + t_range * normal_vector[0],
-            center_point[1] + t_range * normal_vector[1]
-        ])
+        # Step 3: Generate t_range
+        t_range = np.arange(t_start, t_end, t_step / 1e2, dtype=np.float32)
 
-        # Filter within bounds
+        # Step 4: Generate line points along the normal vector
+        x_line_points = np.array(center_point[0] + t_range * normal_vector[0], dtype=np.float32)
+        y_line_points = np.array(center_point[1] + t_range * normal_vector[1], dtype=np.float32)
+        line_points = np.column_stack((x_line_points, y_line_points))
+
+        # Step 5: Filter line points to ensure they remain within bounds
         min_x, max_x = np.min(region_grid[:, 0]), np.max(region_grid[:, 0])
         min_y, max_y = np.min(region_grid[:, 1]), np.max(region_grid[:, 1])
-
-        filtered_points = line_points[
+        line_points_filtered = line_points[
             (line_points[:, 0] >= min_x) & (line_points[:, 0] <= max_x) &
             (line_points[:, 1] >= min_y) & (line_points[:, 1] <= max_y)
-        ]
+            ]
 
-        return filtered_points  # Fixed: Added missing return statement
-
-
-    def _extract_flame_region_detailed(self, dataset: Any, flame_point: np.ndarray) -> Dict[str, np.ndarray]:
-        """Extract detailed temperature field around flame point."""
-        max_level = dataset.index.max_level
-        flame_x, flame_y = flame_point  # Already in meters
-
-        # Extract grids at max level near flame
-        region_data = {'x': [], 'y': [], 'temp': []}
-
-        for grid in dataset.index.grids:
-            if grid.Level == max_level:
-                x = grid["boxlib", "x"].to_value().flatten() / 100  # Convert cm to m
-                y = grid["boxlib", "y"].to_value().flatten() / 100
-                temp = grid["Temp"].flatten()
-
-                # Filter points within reasonable distance
-                current_mean_x = np.mean(x)
-                if current_mean_x > flame_x + 1e-2:  # Skip grids too far downstream
-                    continue
-
-                region_data['x'].extend(x)
-                region_data['y'].extend(y)
-                region_data['temp'].extend(temp)
-
-        return {
-            'x': np.array(region_data['x']),
-            'y': np.array(region_data['y']),
-            'temp': np.array(region_data['temp'])
-        }
-
-    def _create_temperature_interpolator(self, region_data: Dict[str, np.ndarray]) -> callable:
-        """Create 2D temperature interpolator."""
-        from scipy.interpolate import RegularGridInterpolator, griddata
-
-        points = np.column_stack((region_data['x'], region_data['y']))
-
-        # Create regular grid
-        x_min, x_max = region_data['x'].min(), region_data['x'].max()
-        y_min, y_max = region_data['y'].min(), region_data['y'].max()
-
-        xi = np.linspace(x_min, x_max, 50)
-        yi = np.linspace(y_min, y_max, 50)
-        xi_grid, yi_grid = np.meshgrid(xi, yi)
-
-        # Interpolate to regular grid
-        temp_grid = griddata(points, region_data['temp'], (xi_grid, yi_grid), method='cubic')
-
-        return RegularGridInterpolator((yi, xi), temp_grid, bounds_error=False, fill_value=np.nan)
+        return line_points_filtered
 
     def calculate_consumption_rate(self, dataset: Any, contour_points: Optional[np.ndarray],
                                   transport_species: str) -> Tuple[float, float]:
@@ -431,7 +670,6 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                 total_consumption += np.sum(np.abs(row_data)) * dx * dy
 
             # Calculate burning velocity
-            # Get reactant density at flame location
             rho_reactant = cg["boxlib", f"rho_{transport_species}"].to_value()[-1, 0, 0] * 1000  # Convert to kg/m³
             domain_height = (dataset.domain_right_edge[1].to_value() - dataset.domain_left_edge[1].to_value()) / 100
 
@@ -441,112 +679,6 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
 
         except Exception as e:
             raise FlameAnalysisError("consumption_rate", str(e))
-
-    def _extract_flame_region(self, dataset: Any, flame_position: float) -> Dict[str, np.ndarray]:
-        """Extract local temperature field around flame."""
-        max_level = dataset.index.max_level
-        region_size = 2e-3  # 2mm region
-
-        x_coords, y_coords, temperatures = [], [], []
-
-        for grid in dataset.index.grids:
-            if grid.Level == max_level:
-                x = grid["boxlib", "x"].to_value().flatten()
-                y = grid["boxlib", "y"].to_value().flatten()
-                temp = grid["Temp"].flatten()
-
-                # Filter by distance from flame
-                distances = np.abs(x - flame_position * 100)  # Convert to cm
-                mask = distances < region_size * 100
-
-                x_coords.extend(x[mask])
-                y_coords.extend(y[mask])
-                temperatures.extend(temp[mask])
-
-        return {
-            'x': np.array(x_coords),
-            'y': np.array(y_coords),
-            'temperature': np.array(temperatures)
-        }
-
-    def _calculate_flame_normal(self, contour_points: np.ndarray, center_idx: int,
-                               region_data: Dict[str, np.ndarray]) -> np.ndarray:
-        """Calculate normal line through flame at center point."""
-        # Calculate contour gradients to get tangent
-        dx = np.gradient(contour_points[:, 0])
-        dy = np.gradient(contour_points[:, 1])
-
-        # Normal vector (perpendicular to tangent)
-        normal_x = dy[center_idx]
-        normal_y = -dx[center_idx]
-
-        # Normalize
-        normal_length = np.sqrt(normal_x**2 + normal_y**2)
-        if normal_length > 0:
-            normal_x /= normal_length
-            normal_y /= normal_length
-
-        # Center point
-        center_point = contour_points[center_idx]
-
-        # Determine line extent
-        x_span = region_data['x'].max() - region_data['x'].min()
-        y_span = region_data['y'].max() - region_data['y'].min()
-        max_extent = min(x_span, y_span) * 0.4
-
-        # Generate line points
-        t_values = np.linspace(-max_extent, max_extent, 100)
-        line_points = np.column_stack([
-            center_point[0] + t_values * normal_x,
-            center_point[1] + t_values * normal_y
-        ])
-
-        # Filter to stay within region bounds
-        min_x, max_x = region_data['x'].min(), region_data['x'].max()
-        min_y, max_y = region_data['y'].min(), region_data['y'].max()
-
-        valid_mask = ((line_points[:, 0] >= min_x) & (line_points[:, 0] <= max_x) &
-                     (line_points[:, 1] >= min_y) & (line_points[:, 1] <= max_y))
-
-        return line_points[valid_mask]
-
-    def _interpolate_along_normal(self, region_data: Dict[str, np.ndarray],
-                                 normal_line: np.ndarray) -> np.ndarray:
-        """Interpolate temperature along normal line."""
-        from scipy.interpolate import griddata
-
-        points = np.column_stack([region_data['x'], region_data['y']])
-        temperatures = griddata(points, region_data['temperature'], normal_line, method='linear')
-
-        return temperatures
-
-    def _compute_thickness_from_gradient(self, normal_line: np.ndarray,
-                                        temperatures: np.ndarray) -> float:
-        """Compute flame thickness from temperature profile along normal."""
-        # Remove NaN values
-        valid_mask = ~np.isnan(temperatures)
-        if np.sum(valid_mask) < 10:
-            return np.nan
-
-        valid_temps = temperatures[valid_mask]
-        valid_positions = normal_line[valid_mask]
-
-        # Calculate cumulative distances along normal line
-        distances = np.zeros(len(valid_positions))
-        for i in range(1, len(valid_positions)):
-            distances[i] = distances[i-1] + np.linalg.norm(valid_positions[i] - valid_positions[i-1])
-
-        # Calculate temperature gradient
-        temp_gradient = np.abs(np.gradient(valid_temps, distances))
-
-        if len(temp_gradient) == 0 or np.max(temp_gradient) == 0:
-            return np.nan
-
-        # Flame thickness = temperature rise / max gradient
-        temp_rise = np.max(valid_temps) - np.min(valid_temps)
-        max_gradient = np.max(temp_gradient)
-
-        return temp_rise / max_gradient  # Already in meters
 
     def find_wave_position(self, data: FieldData, wave_type: WaveType) -> Tuple[int, float]:
         """Find flame position using temperature and species criteria."""
@@ -578,13 +710,11 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
 
         return flame_idx, data.coordinates[flame_idx]
 
-
     def calculate_wave_velocity(self, positions: np.ndarray, times: np.ndarray) -> np.ndarray:
         """Calculate flame velocity from position time series."""
         if len(positions) < 2:
             return np.array([])
         return np.gradient(positions, times)
-
 
     def analyze_flame_properties(self, dataset: Any, data: FieldData) -> FlameProperties:
         """Complete flame analysis matching original flame_geometry function."""
@@ -593,11 +723,11 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
 
         properties = FlameProperties(position=flame_pos, index=flame_idx)
 
-        # Extract 2D flame contour
+        # Extract 2D flame contour using known flame position for local search
         try:
-            contour_points = self.extract_flame_contour(dataset)
+            contour_points = self.extract_flame_contour(dataset, flame_pos)
             if len(contour_points) > 0:
-                # Sort contour points (matching original algorithm)
+                # Sort contour points
                 sorted_points, segments, surface_length = self.sort_contour_by_nearest_neighbors(contour_points, dataset)
 
                 properties.surface_length = surface_length

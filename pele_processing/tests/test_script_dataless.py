@@ -9,14 +9,79 @@ import tempfile
 from pathlib import Path
 import numpy as np
 
-# Add src directory to path for imports
-from ..src.pele_processing.core import Container, get_global_container
-from ..src.pele_processing.config import create_default_config
-from ..src.pele_processing.data import create_data_loader, create_data_extractor
-from ..src.pele_processing.analysis import create_flame_analyzer, create_thermodynamic_calculator
-from ..src.pele_processing.parallel import create_processing_strategy
-from ..src.pele_processing.visualization import StandardPlotter
-from ..src.pele_processing.utils import setup_logging, PeleUnitConverter
+# Main package import
+try:
+    import pele_processing
+
+    print("✓ Main package imported successfully")
+except ImportError as e:
+    print(f"✗ Failed to import main package: {e}")
+    sys.exit(1)
+
+# Import all relevant sub-functions and classes at the start
+try:
+    # Core domain classes
+    from pele_processing.core.domain import (
+        FieldData, SpeciesData, WaveType, ProcessingResult,
+        DatasetInfo, ProcessingBatch, AnimationFrame
+    )
+
+    # Core container system
+    from pele_processing.core.container import Container, get_global_container
+
+    # Configuration functions
+    from pele_processing.config import (
+        create_default_config, AppConfig, load_config, save_config
+    )
+
+    # Data processing functions
+    from pele_processing.data import (
+        create_data_loader, create_data_extractor,
+        create_standard_processor, create_analysis_processor
+    )
+
+    # Analysis functions
+    from pele_processing.analysis import (
+        create_flame_analyzer, create_shock_analyzer,
+        create_thermodynamic_calculator, create_geometry_analyzer
+    )
+
+    # Parallel processing functions
+    from pele_processing.parallel import (
+        create_processing_strategy, create_coordinator,
+        create_distributor, create_default_adaptive_strategy
+    )
+
+    # Visualization functions
+    from pele_processing.visualization import (
+        StandardPlotter, LocalViewPlotter, StatisticalPlotter,
+        FrameAnimator, BatchAnimator, InteractiveAnimator,
+        create_formatter, SchlierenVisualizer, StreamlineVisualizer
+    )
+
+    # Utility functions
+    from pele_processing.utils import (
+        setup_logging, create_logger, create_unit_converter,
+        PeleUnitConverter, load_dataset_paths, sort_dataset_paths,
+        ensure_directory_exists, clean_filename
+    )
+
+    # Constants
+    from pele_processing.utils.constants import (
+        DEFAULT_FLAME_TEMPERATURE, DEFAULT_SHOCK_PRESSURE_RATIO,
+        COMMON_SPECIES, ERROR_CODES
+    )
+
+    # Convenience functions from main package
+    from pele_processing import (
+        quick_analysis, create_analysis_pipeline
+    )
+
+    print("✓ All components imported successfully")
+
+except ImportError as e:
+    print(f"✗ Failed to import components: {e}")
+    sys.exit(1)
 
 
 class MockDataset:
@@ -103,6 +168,12 @@ class MockFieldData:
     def flatten(self):
         return self._data
 
+    def __getitem__(self, key):
+        return MockFieldData(self._data[key])
+
+    def __len__(self):
+        return len(self._data)
+
 
 class MockRay:
     def __init__(self):
@@ -181,7 +252,6 @@ def test_flame_analysis():
     temp = 300 + 2200 * np.exp(-((x - 0.05) * 1000) ** 2)  # Flame at 5cm
     ho2 = 0.01 * np.exp(-((x - 0.05) * 1000) ** 2)
 
-    from ..src.pele_processing.core.domain import FieldData, SpeciesData
     species_data = SpeciesData()
     species_data.mass_fractions['HO2'] = ho2
 
@@ -197,7 +267,6 @@ def test_flame_analysis():
     # Test flame analyzer
     flame_analyzer = create_flame_analyzer(flame_temperature=2000.0)
 
-    from ..src.pele_processing.core.domain import WaveType
     flame_idx, flame_pos = flame_analyzer.find_wave_position(field_data, WaveType.FLAME)
 
     # Should find flame near center (0.05m)
@@ -214,7 +283,6 @@ def test_parallel_processing():
     strategy = create_processing_strategy("sequential")
 
     def mock_processor(dataset_path):
-        from ..src.pele_processing.core.domain import ProcessingResult, DatasetInfo
         return ProcessingResult(
             dataset_info=DatasetInfo.from_path(dataset_path),
             success=True
@@ -237,8 +305,6 @@ def test_visualization():
     # Create test data
     x_data = np.linspace(0, 0.1, 100)
     y_data = 300 + 2200 * np.exp(-((x_data - 0.05) * 1000) ** 2)
-
-    from ..src.pele_processing.core.domain import AnimationFrame
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output_path = Path(tmpdir) / "test_plot.png"
@@ -279,6 +345,71 @@ def test_integration():
     print("✓ Integration tests passed")
 
 
+def test_convenience_functions():
+    """Test package convenience functions."""
+    print("Testing convenience functions...")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_dir = Path(tmpdir) / "input"
+        output_dir = Path(tmpdir) / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+
+        # Test create_analysis_pipeline
+        config = create_default_config(input_dir, output_dir)
+        pipeline = create_analysis_pipeline(config)
+
+        assert 'loader' in pipeline
+        assert 'extractor' in pipeline
+        assert 'strategy' in pipeline
+
+    print("✓ Convenience function tests passed")
+
+
+def test_all_analyzers():
+    """Test all available analyzers."""
+    print("Testing all analyzers...")
+
+    # Test flame analyzer
+    flame_analyzer = create_flame_analyzer(DEFAULT_FLAME_TEMPERATURE)
+    assert flame_analyzer is not None
+
+    # Test shock analyzer
+    shock_analyzer = create_shock_analyzer(DEFAULT_SHOCK_PRESSURE_RATIO)
+    assert shock_analyzer is not None
+
+    # Test geometry analyzer
+    geometry_analyzer = create_geometry_analyzer()
+    assert geometry_analyzer is not None
+
+    print("✓ All analyzer tests passed")
+
+
+def test_all_visualizers():
+    """Test all visualization components."""
+    print("Testing all visualizers...")
+
+    # Test all plotter types
+    standard_plotter = StandardPlotter()
+    local_plotter = LocalViewPlotter()
+    stats_plotter = StatisticalPlotter()
+
+    # Test all animators
+    frame_animator = FrameAnimator()
+    batch_animator = BatchAnimator()
+
+    # Test specialized visualizers
+    schlieren_viz = SchlierenVisualizer()
+    streamline_viz = StreamlineVisualizer()
+
+    # Test formatters
+    table_formatter = create_formatter("table")
+    csv_formatter = create_formatter("csv")
+    json_formatter = create_formatter("json")
+
+    print("✓ All visualizer tests passed")
+
+
 def main():
     """Run all tests."""
     print("Running Pele Processing System Tests")
@@ -291,6 +422,9 @@ def main():
         test_parallel_processing()
         test_visualization()
         test_integration()
+        test_convenience_functions()
+        test_all_analyzers()
+        test_all_visualizers()
 
         print("\n" + "=" * 50)
         print(" All tests passed!")

@@ -136,8 +136,8 @@ class PathConfig:
     input_directory: Path
     mechanism_file: Optional[Path] = None
 
-    # Output paths
-    output_directory: Path = Path("./output")
+    # Output paths - now defaults to a new 'pele_results' folder in working directory
+    output_directory: Path = Path("./pele_results")
     log_directory: Optional[Path] = None  # Defaults to output_directory/logs
 
     # Subdirectories (relative to output_directory)
@@ -274,7 +274,7 @@ class AppConfig:
 DEFAULT_FLAME_CONFIG = AppConfig(
     paths=PathConfig(
         input_directory=Path("./data"),
-        output_directory=Path("./output/flame_analysis")
+        output_directory=Path("./pele_results/flame_analysis")
     ),
     processing=ProcessingConfig(
         analyze_shock_position=False,
@@ -290,7 +290,7 @@ DEFAULT_FLAME_CONFIG = AppConfig(
 DEFAULT_SHOCK_CONFIG = AppConfig(
     paths=PathConfig(
         input_directory=Path("./data"),
-        output_directory=Path("./output/shock_analysis")
+        output_directory=Path("./pele_results/shock_analysis")
     ),
     processing=ProcessingConfig(
         analyze_flame_thickness=False,
@@ -302,7 +302,7 @@ DEFAULT_SHOCK_CONFIG = AppConfig(
 DEFAULT_FULL_CONFIG = AppConfig(
     paths=PathConfig(
         input_directory=Path("./data"),
-        output_directory=Path("./output/full_analysis")
+        output_directory=Path("./pele_results/full_analysis")
     ),
     visualization=VisualizationConfig(
         animate_schlieren=True,
