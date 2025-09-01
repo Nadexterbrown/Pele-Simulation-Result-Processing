@@ -53,8 +53,7 @@ from .data import (
 from .analysis import (
     PeleFlameAnalyzer, create_flame_analyzer,
     PeleShockAnalyzer, create_shock_analyzer,
-    CanteraThermodynamicCalculator, IdealGasCalculator,
-    EquilibriumCalculator, create_thermodynamic_calculator,
+    CanteraThermodynamicCalculator, create_thermodynamic_calculator,
     GeometryAnalyzer, FlameGeometryAnalyzer, create_geometry_analyzer
 )
 
@@ -96,8 +95,8 @@ from .utils import (
 
 # Version and metadata
 __version__ = "1.0.0"
-__author__ = "Pele Processing Team"
-__email__ = "support@pele-processing.org"
+__author__ = "Nolan Dexter-Brown"
+__email__ = "nadexterbrown@gmail.com"
 __description__ = "Parallel processing system for Pele combustion simulation analysis"
 __url__ = "https://github.com/pele-combustion/pele-processing"
 

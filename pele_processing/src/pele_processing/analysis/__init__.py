@@ -14,8 +14,7 @@ from .shock import (
 
 # Thermodynamics
 from .thermodynamics import (
-    CanteraThermodynamicCalculator, IdealGasCalculator,
-    EquilibriumCalculator, create_thermodynamic_calculator
+    CanteraThermodynamicCalculator, create_thermodynamic_calculator
 )
 
 # Geometry analysis
@@ -34,8 +33,6 @@ __all__ = [
 
     # Thermodynamics
     'CanteraThermodynamicCalculator',
-    'IdealGasCalculator',
-    'EquilibriumCalculator',
     'create_thermodynamic_calculator',
 
     # Geometry
