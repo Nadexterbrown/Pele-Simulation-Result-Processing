@@ -118,6 +118,7 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                 flame_pos_cm = flame_pos * 100  # Convert to cm for YT
                 
                 # Create focused left/right edges (±5mm around flame)
+                # Use the full Y domain but ensure X bounds are properly clamped
                 focused_left = [
                     max(domain_left[0], flame_pos_cm - flame_window * 100),  # Don't go outside domain
                     domain_left[1],
@@ -140,7 +141,16 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                 print(f"Creating regional box region (no flame position known)")
                 print(f"Box bounds: x=[{focused_left[0]:.1f}, {focused_right[0]:.1f}]cm, 2.5% buffer")
             
-            # Create box region and extract contours
+            # Create box region and extract contours with validation
+            print(f"Domain bounds: x=[{domain_left[0]:.2f}, {domain_right[0]:.2f}]cm, y=[{domain_left[1]:.4f}, {domain_right[1]:.4f}]cm")
+            print(f"Box region: x=[{focused_left[0]:.2f}, {focused_right[0]:.2f}]cm, y=[{focused_left[1]:.4f}, {focused_right[1]:.4f}]cm")
+            
+            # Validate bounds are within domain
+            if (focused_left[0] < domain_left[0] or focused_right[0] > domain_right[0] or
+                focused_left[1] < domain_left[1] or focused_right[1] > domain_right[1]):
+                print("Warning: Box bounds exceed domain, falling back to full domain extraction")
+                raise ValueError("Box bounds exceed domain")
+            
             box_region = dataset.box(left_edge=focused_left, right_edge=focused_right)
             contours = box_region.extract_isocontours("Temp", self.flame_temperature)
             
@@ -722,6 +732,34 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         flame_idx, flame_pos = self.find_wave_position(data, WaveType.FLAME)
 
         properties = FlameProperties(position=flame_pos, index=flame_idx)
+
+        # Extract thermodynamic state at flame location from 1D data
+        try:
+            from ..core.domain import ThermodynamicState
+            
+            # Extract state directly from 1D data at flame index
+            if flame_idx is not None and flame_idx < len(data.coordinates):
+                temp = data.temperature[flame_idx]
+                pressure = data.pressure[flame_idx]
+                density = data.density[flame_idx]
+                
+                # Calculate sound speed from ideal gas relations
+                # c = sqrt(gamma * R * T), assuming gamma = 1.4 and R = pressure/(density*T)
+                sound_speed = np.sqrt(1.4 * pressure / density)
+                
+                properties.thermodynamic_state = ThermodynamicState(
+                    temperature=temp,
+                    pressure=pressure, 
+                    density=density,
+                    sound_speed=sound_speed
+                )
+                
+                print(f"  Flame thermodynamic state: T={temp:.1f}K, P={pressure:.0f}Pa, ρ={density:.3f}kg/m³")
+            else:
+                print("  Could not extract thermodynamic state: invalid flame index")
+                
+        except Exception as e:
+            print(f"  Thermodynamic state extraction failed: {e}")
 
         # Extract 2D flame contour using known flame position for local search
         try:
