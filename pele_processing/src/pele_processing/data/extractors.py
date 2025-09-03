@@ -8,6 +8,7 @@ from ..core.interfaces import DataExtractor, UnitConverter
 from ..core.domain import FieldData, ThermodynamicState, Point2D, Direction, SpeciesData
 from ..core.exceptions import DataExtractionError, FieldNotFoundError
 from ..utils.constants import COMMON_SPECIES
+from ..utils.pele_constants import PELE_VAR_MAP, get_missing_fields, add_species_vars
 
 try:
     import cantera as ct
@@ -49,20 +50,23 @@ class PeleDataExtractor(DataExtractor):
                 ray["boxlib", 'x'][sort_idx].to_value(), 'cm', 'm'
             )
 
-            # Extract basic fields
+            # Identify missing fields that need Cantera calculation
+            field_names_in_data = [field_name for _, field_name in dataset.field_list]
+            missing_fields = get_missing_fields(field_names_in_data)
+            
+            # Extract basic fields with fallback to Cantera
             temperature = ray["boxlib", "Temp"][sort_idx].to_value()
             pressure = self.unit_converter.convert_value(
                 ray["boxlib", "pressure"][sort_idx].to_value(), 'dyne/cm^2', 'Pa'
             )
-            velocity_x = self.unit_converter.convert_value(
-                ray["boxlib", "x_velocity"][sort_idx].to_value(), 'cm/s', 'm/s'
-            )
-
-            # Extract species data if available
+            
+            # Extract species data first (needed for Cantera calculations)
             species_data = self._extract_species_data(ray, sort_idx)
 
-            # Calculate derived fields using Cantera if available
-            density = self._calculate_density(temperature, pressure, species_data)
+            # Extract or calculate all variables using single functions per variable
+            velocity_x = self._get_x_velocity(ray, sort_idx, field_names_in_data)
+            density = self._get_density(ray, sort_idx, temperature, pressure, species_data, field_names_in_data, missing_fields)
+            heat_release_rate = self._get_heat_release_rate(ray, sort_idx, temperature, pressure, species_data, field_names_in_data, missing_fields)
 
             return FieldData(
                 coordinates=coords,
@@ -70,25 +74,46 @@ class PeleDataExtractor(DataExtractor):
                 pressure=pressure,
                 density=density,
                 velocity_x=velocity_x,
+                heat_release_rate=heat_release_rate,
                 species_data=species_data
             )
 
         except Exception as e:
             raise DataExtractionError("ray", location, str(e))
 
-    def extract_2d_contour(self, dataset: Any, field_name: str, iso_value: float) -> np.ndarray:
-        """Extract 2D iso-contour."""
-        try:
-            # Use YT's contour extraction
-            if hasattr(dataset, 'all_data'):
-                contours = dataset.all_data().extract_isocontours(field_name, iso_value)
-                return self._process_contour_points(contours)
-            else:
-                # Manual contour extraction
-                return self._manual_contour_extraction(dataset, field_name, iso_value)
 
+    def extract_gas_velocity(self, dataset: Any, location: float, direction: Direction = Direction.X) -> float:
+        """Extract gas velocity at specific location."""
+        try:
+            # Extract 1D ray data at the location
+            if direction == Direction.Y:
+                ray = dataset.ortho_ray(0, (location * 100, 0))  # Convert m to cm
+                x_coords = ray["boxlib", 'x'].to_value()
+                velocity_field = ray["x_velocity"].to_value()
+            else:  # Direction.X
+                ray = dataset.ortho_ray(1, (0, location * 100))  # Convert m to cm
+                x_coords = ray["boxlib", 'y'].to_value()
+                velocity_field = ray["y_velocity"].to_value()
+            
+            # Sort and find closest point
+            sort_idx = np.argsort(x_coords)
+            sorted_coords = x_coords[sort_idx]
+            sorted_velocity = velocity_field[sort_idx]
+            
+            # Find target location in cm
+            target_location_cm = location * 100
+            target_idx = np.argmin(np.abs(sorted_coords - target_location_cm))
+            
+            # Convert from cm/s to m/s
+            gas_velocity = self.unit_converter.convert_value(
+                sorted_velocity[target_idx], 'cm/s', 'm/s'
+            )
+            
+            return gas_velocity
+            
         except Exception as e:
-            raise DataExtractionError("contour", None, str(e))
+            print(f"Error extracting gas velocity: {e}")
+            return 0.0
 
     def extract_thermodynamic_state(self, dataset: Any, location: Point2D) -> ThermodynamicState:
         """Extract thermodynamic state at point."""
@@ -136,9 +161,9 @@ class PeleDataExtractor(DataExtractor):
             'temperature': 'Temp',
             'pressure': 'pressure',
             'density': 'density',
-            'x_velocity': 'x_velocity',
-            'y_velocity': 'y_velocity',
-            'heat_release': 'heatRelease'
+            'velocity_x': 'x_velocity',  # FieldData.velocity_x maps to Pele's x_velocity
+            'velocity_y': 'y_velocity',  # FieldData.velocity_y maps to Pele's y_velocity
+            'heat_release_rate': 'heatRelease'
         }
 
     def _extract_species_data(self, ray: Any, sort_idx: np.ndarray) -> Optional[SpeciesData]:
@@ -173,74 +198,286 @@ class PeleDataExtractor(DataExtractor):
             # Ideal gas approximation
             return pressure / (287 * temperature)
 
-    def _process_contour_points(self, contours: np.ndarray) -> np.ndarray:
-        """Process raw contour points."""
-        if len(contours) == 0:
-            return np.array([])
+    def _get_x_velocity(self, ray: Any, sort_idx: np.ndarray, field_names_in_data: List[str]) -> np.ndarray:
+        """Get X velocity (extract only - should always be in Pele data)."""
+        field_name = PELE_VAR_MAP['X Velocity']['Name']  # 'x_velocity'
+        
+        if field_name in field_names_in_data:
+            try:
+                velocity_raw = ray["boxlib", field_name][sort_idx].to_value()
+                velocity_ms = self.unit_converter.convert_value(velocity_raw, 'cm/s', 'm/s')
+                print(f"  Successfully extracted {field_name}: {len(velocity_ms)} points, range [{np.min(velocity_ms):.2f}, {np.max(velocity_ms):.2f}] m/s")
+                return velocity_ms
+            except Exception as e:
+                print(f"  Error extracting {field_name}: {e}")
+        
+        print(f"  Warning: {field_name} not found in data, using zeros")
+        return np.zeros(len(ray["boxlib", 'x'][sort_idx]))
 
-        # Convert from cm to m
-        contours_m = self.unit_converter.convert_value(contours, 'cm', 'm')
+    def _get_density(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
+                    pressure: np.ndarray, species_data: Optional[SpeciesData],
+                    field_names_in_data: List[str], missing_fields: Dict[str, str]) -> np.ndarray:
+        """Get density (extract from data or calculate using Cantera)."""
+        field_name = PELE_VAR_MAP['Density']['Name']  # 'density'
+        
+        # Try direct extraction first
+        if field_name in field_names_in_data:
+            try:
+                density_raw = ray["boxlib", field_name][sort_idx].to_value()
+                return self.unit_converter.convert_value(density_raw, 'g/cm^3', 'kg/m^3')
+            except Exception as e:
+                print(f"  Could not extract {field_name}: {e}")
 
-        # Sort contour points by connectivity
-        return self._sort_contour_points(contours_m)
+        # Calculate using Cantera if available
+        if 'Density' in missing_fields and self.gas and species_data and species_data.mass_fractions:
+            print("  Calculating density using Cantera...")
+            return self._calculate_with_cantera(temperature, pressure, species_data, 'density')
+        else:
+            # Ideal gas approximation (air)
+            print("  Using ideal gas approximation for density")
+            return pressure / (287 * temperature)
 
-    def _sort_contour_points(self, points: np.ndarray) -> np.ndarray:
-        """Sort contour points for continuous curves."""
-        if len(points) < 2:
-            return points
+    def _get_heat_release_rate(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
+                              pressure: np.ndarray, species_data: Optional[SpeciesData],
+                              field_names_in_data: List[str], missing_fields: Dict[str, str]) -> Optional[np.ndarray]:
+        """Get heat release rate (extract from data or calculate using Cantera)."""
+        field_name = PELE_VAR_MAP['Heat Release Rate']['Name']  # 'heatRelease'
+        
+        # Try direct extraction first
+        if field_name in field_names_in_data:
+            try:
+                hrr_raw = ray["boxlib", field_name][sort_idx].to_value()
+                print(f"  Successfully extracted {field_name}: {len(hrr_raw)} points, range [{np.min(hrr_raw):.2e}, {np.max(hrr_raw):.2e}] units")
+                return hrr_raw
+            except Exception as e:
+                print(f"  Could not extract {field_name}: {e}")
+        
+        # Calculate using Cantera if available
+        if 'Heat Release Rate' in missing_fields and self.gas and species_data and species_data.mass_fractions:
+            print("  Calculating heat release rate using Cantera...")
+            hrr_calc = self._calculate_with_cantera(temperature, pressure, species_data, 'heat_release_rate')
+            if hrr_calc is not None:
+                print(f"  Cantera calculated heat release rate: {len(hrr_calc)} points, range [{np.min(hrr_calc):.2e}, {np.max(hrr_calc):.2e}] W/m³")
+            return hrr_calc
+        
+        print(f"  Warning: {field_name} not available and cannot calculate with Cantera")
+        return None
 
-        from scipy.spatial import cKDTree
+    def _get_viscosity(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
+                      pressure: np.ndarray, species_data: Optional[SpeciesData],
+                      field_names_in_data: List[str], missing_fields: Dict[str, str]) -> Optional[np.ndarray]:
+        """Get viscosity (extract from data or calculate using Cantera)."""
+        field_name = PELE_VAR_MAP['Viscosity']['Name']  # 'viscosity'
+        
+        # Try direct extraction first
+        if field_name in field_names_in_data:
+            try:
+                viscosity_raw = ray["boxlib", field_name][sort_idx].to_value()
+                return self.unit_converter.convert_value(viscosity_raw, 'g/(cm*s)', 'Pa*s')
+            except Exception as e:
+                print(f"  Could not extract {field_name}: {e}")
+        
+        # Calculate using Cantera if available
+        if 'Viscosity' in missing_fields and self.gas and species_data and species_data.mass_fractions:
+            print("  Calculating viscosity using Cantera...")
+            return self._calculate_with_cantera(temperature, pressure, species_data, 'viscosity')
+        
+        return None
 
-        tree = cKDTree(points)
-        sorted_points = [points[0]]
-        remaining = list(range(1, len(points)))
+    def _get_conductivity(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
+                         pressure: np.ndarray, species_data: Optional[SpeciesData],
+                         field_names_in_data: List[str], missing_fields: Dict[str, str]) -> Optional[np.ndarray]:
+        """Get thermal conductivity (extract from data or calculate using Cantera)."""
+        field_name = PELE_VAR_MAP['Conductivity']['Name']  # 'conductivity'
+        
+        # Try direct extraction first
+        if field_name in field_names_in_data:
+            try:
+                conductivity_raw = ray["boxlib", field_name][sort_idx].to_value()
+                return self.unit_converter.convert_value(conductivity_raw, 'W/(cm*K)', 'W/(m*K)')
+            except Exception as e:
+                print(f"  Could not extract {field_name}: {e}")
+        
+        # Calculate using Cantera if available
+        if 'Conductivity' in missing_fields and self.gas and species_data and species_data.mass_fractions:
+            print("  Calculating thermal conductivity using Cantera...")
+            return self._calculate_with_cantera(temperature, pressure, species_data, 'conductivity')
+        
+        return None
 
-        current_point = points[0]
-        while remaining:
-            distances, indices = tree.query(current_point, k=len(points))
+    def _get_sound_speed(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
+                        pressure: np.ndarray, species_data: Optional[SpeciesData],
+                        field_names_in_data: List[str], missing_fields: Dict[str, str]) -> Optional[np.ndarray]:
+        """Get sound speed (extract from data or calculate using Cantera)."""
+        field_name = PELE_VAR_MAP['Sound speed']['Name']  # 'soundspeed'
+        
+        # Try direct extraction first
+        if field_name in field_names_in_data:
+            try:
+                sound_speed_raw = ray["boxlib", field_name][sort_idx].to_value()
+                return self.unit_converter.convert_value(sound_speed_raw, 'cm/s', 'm/s')
+            except Exception as e:
+                print(f"  Could not extract {field_name}: {e}")
+        
+        # Calculate using Cantera if available
+        if 'Sound speed' in missing_fields and self.gas and species_data and species_data.mass_fractions:
+            print("  Calculating sound speed using Cantera...")
+            return self._calculate_with_cantera(temperature, pressure, species_data, 'sound_speed')
+        
+        return None
 
-            for idx in indices[1:]:  # Skip current point
-                if idx in remaining:
-                    sorted_points.append(points[idx])
-                    remaining.remove(idx)
-                    current_point = points[idx]
-                    break
+    def _get_cp(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
+               pressure: np.ndarray, species_data: Optional[SpeciesData],
+               field_names_in_data: List[str], missing_fields: Dict[str, str]) -> Optional[np.ndarray]:
+        """Get specific heat at constant pressure (extract from data or calculate using Cantera)."""
+        field_name = PELE_VAR_MAP['Cp']['Name']  # 'cp'
+        
+        # Try direct extraction first
+        if field_name in field_names_in_data:
+            try:
+                cp_raw = ray["boxlib", field_name][sort_idx].to_value()
+                return self.unit_converter.convert_value(cp_raw, 'cm^2/(s^2*K)', 'J/(kg*K)')
+            except Exception as e:
+                print(f"  Could not extract {field_name}: {e}")
+        
+        # Calculate using Cantera if available
+        if 'Cp' in missing_fields and self.gas and species_data and species_data.mass_fractions:
+            print("  Calculating Cp using Cantera...")
+            return self._calculate_with_cantera(temperature, pressure, species_data, 'cp')
+        
+        return None
 
-        return np.array(sorted_points)
+    def _get_cv(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
+               pressure: np.ndarray, species_data: Optional[SpeciesData],
+               field_names_in_data: List[str], missing_fields: Dict[str, str]) -> Optional[np.ndarray]:
+        """Get specific heat at constant volume (extract from data or calculate using Cantera)."""
+        field_name = PELE_VAR_MAP['Cv']['Name']  # 'cv'
+        
+        # Try direct extraction first
+        if field_name in field_names_in_data:
+            try:
+                cv_raw = ray["boxlib", field_name][sort_idx].to_value()
+                return self.unit_converter.convert_value(cv_raw, 'cm^2/(s^2*K)', 'J/(kg*K)')
+            except Exception as e:
+                print(f"  Could not extract {field_name}: {e}")
+        
+        # Calculate using Cantera if available
+        if 'Cv' in missing_fields and self.gas and species_data and species_data.mass_fractions:
+            print("  Calculating Cv using Cantera...")
+            return self._calculate_with_cantera(temperature, pressure, species_data, 'cv')
+        
+        return None
 
-    def _manual_contour_extraction(self, dataset: Any, field_name: str, iso_value: float) -> np.ndarray:
-        """Manual contour extraction for datasets without YT support."""
-        try:
-            from matplotlib.tri import Triangulation
-            import matplotlib.pyplot as plt
+    def _get_species_diffusion_coeff(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
+                                    pressure: np.ndarray, species_data: Optional[SpeciesData],
+                                    field_names_in_data: List[str], missing_fields: Dict[str, str],
+                                    species: str) -> Optional[np.ndarray]:
+        """Get species diffusion coefficient (extract from data or calculate using Cantera)."""
+        field_name = f'D({species})'
+        pele_field_name = PELE_VAR_MAP.get(field_name, {}).get('Name', field_name)
+        
+        # Try direct extraction first
+        if pele_field_name in field_names_in_data:
+            try:
+                return ray["boxlib", pele_field_name][sort_idx].to_value()
+            except Exception as e:
+                print(f"  Could not extract {pele_field_name}: {e}")
+        
+        # Calculate using Cantera if available
+        if field_name in missing_fields and self.gas and species_data and species_data.mass_fractions:
+            print(f"  Calculating {field_name} using Cantera...")
+            return self._calculate_species_property_cantera(temperature, pressure, species_data, species, 'diffusion')
+        
+        return None
 
-            # Extract 2D data at highest level
-            max_level = dataset.index.max_level
-            x_coords, y_coords, field_values = [], [], []
+    def _get_species_density(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
+                            pressure: np.ndarray, species_data: Optional[SpeciesData],
+                            field_names_in_data: List[str], missing_fields: Dict[str, str],
+                            species: str) -> Optional[np.ndarray]:
+        """Get species density (extract from data or calculate using Cantera)."""
+        field_name = f'rho_{species}'
+        pele_field_name = f'rho_{species}'
+        
+        # Try direct extraction first
+        if pele_field_name in field_names_in_data:
+            try:
+                rho_species_raw = ray["boxlib", pele_field_name][sort_idx].to_value()
+                return self.unit_converter.convert_value(rho_species_raw, 'g/cm^3', 'kg/m^3')
+            except Exception as e:
+                print(f"  Could not extract {pele_field_name}: {e}")
+        
+        # Calculate using Cantera if available
+        if field_name in missing_fields and self.gas and species_data and species_data.mass_fractions:
+            print(f"  Calculating {field_name} using Cantera...")
+            return self._calculate_species_property_cantera(temperature, pressure, species_data, species, 'density')
+        
+        return None
 
-            for grid in dataset.index.grids:
-                if grid.Level == max_level:
-                    x_coords.extend(grid["boxlib", "x"].to_value().flatten())
-                    y_coords.extend(grid["boxlib", "y"].to_value().flatten())
-                    field_values.extend(grid[field_name].flatten())
+    def _calculate_with_cantera(self, temperature: np.ndarray, pressure: np.ndarray,
+                               species_data: SpeciesData, property_name: str) -> np.ndarray:
+        """Unified Cantera calculation method for all properties."""
+        result = np.zeros_like(temperature)
+        
+        for i in range(len(temperature)):
+            try:
+                Y = {species: fractions[i] for species, fractions in species_data.mass_fractions.items()}
+                self.gas.TPY = temperature[i], pressure[i], Y
+                
+                if property_name == 'density':
+                    result[i] = self.gas.density
+                elif property_name == 'heat_release_rate':
+                    result[i] = np.sum(self.gas.net_production_rates * self.gas.standard_enthalpies_RT * ct.gas_constant * self.gas.T)
+                elif property_name == 'viscosity':
+                    result[i] = self.gas.viscosity
+                elif property_name == 'conductivity':
+                    result[i] = self.gas.thermal_conductivity
+                elif property_name == 'sound_speed':
+                    result[i] = self.gas.sound_speed
+                elif property_name == 'cp':
+                    result[i] = self.gas.cp_mass
+                elif property_name == 'cv':
+                    result[i] = self.gas.cv_mass
+                else:
+                    result[i] = 0.0
+                    
+            except Exception as e:
+                # Default values for failed calculations
+                defaults = {
+                    'density': pressure[i] / (287 * temperature[i]),
+                    'heat_release_rate': 0.0,
+                    'viscosity': 0.0,
+                    'conductivity': 0.0,
+                    'sound_speed': 300.0,
+                    'cp': 1005.0,
+                    'cv': 718.0
+                }
+                result[i] = defaults.get(property_name, 0.0)
+        
+        return result
 
-            x_coords, y_coords = np.array(x_coords), np.array(y_coords)
-            field_values = np.array(field_values)
-
-            # Create triangulation and extract contour
-            tri = Triangulation(x_coords, y_coords)
-            contour = plt.tricontour(tri, field_values, levels=[iso_value])
-
-            if contour.collections:
-                paths = contour.collections[0].get_paths()
-                if paths:
-                    contour_points = paths[0].vertices
-                    return self.unit_converter.convert_value(contour_points, 'cm', 'm')
-
-            return np.array([])
-
-        except Exception as e:
-            raise DataExtractionError("manual_contour", None, str(e))
+    def _calculate_species_property_cantera(self, temperature: np.ndarray, pressure: np.ndarray,
+                                          species_data: SpeciesData, species: str, property_name: str) -> np.ndarray:
+        """Calculate species-specific properties using Cantera."""
+        result = np.zeros_like(temperature)
+        
+        for i in range(len(temperature)):
+            try:
+                Y = {spec: fractions[i] for spec, fractions in species_data.mass_fractions.items()}
+                self.gas.TPY = temperature[i], pressure[i], Y
+                
+                species_idx = self.gas.species_index(species)
+                
+                if property_name == 'diffusion':
+                    result[i] = self.gas.mix_diff_coeffs_mass[species_idx]
+                elif property_name == 'density':
+                    result[i] = self.gas.density * self.gas.Y[species_idx]
+                else:
+                    result[i] = 0.0
+                    
+            except Exception as e:
+                result[i] = 0.0
+        
+        return result
 
 
 class MultiLevelExtractor(DataExtractor):
@@ -254,8 +491,6 @@ class MultiLevelExtractor(DataExtractor):
         # For now, just use base extractor at max level
         return self.base_extractor.extract_ray_data(dataset, location, direction)
 
-    def extract_2d_contour(self, dataset: Any, field_name: str, iso_value: float) -> np.ndarray:
-        return self.base_extractor.extract_2d_contour(dataset, field_name, iso_value)
 
     def extract_thermodynamic_state(self, dataset: Any, location: Point2D) -> ThermodynamicState:
         return self.base_extractor.extract_thermodynamic_state(dataset, location)
