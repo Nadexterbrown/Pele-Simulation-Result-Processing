@@ -24,7 +24,6 @@ class YTDataLoader(DataLoader):
     def __init__(self):
         if not YT_AVAILABLE:
             raise DataLoadError("", "YT not available")
-        yt.enable_parallelism()
 
     def load_dataset(self, path: Union[str, Path]) -> Any:
         """Load dataset using YT."""
