@@ -134,6 +134,19 @@ class GasProperties:
 
 
 @dataclass
+class BurnedGasProperties:
+    """Burned gas properties behind the flame."""
+    position: Optional[float] = None  # m
+    index: Optional[int] = None
+    velocity: Optional[float] = None  # m/s
+    thermodynamic_state: Optional[ThermodynamicState] = None
+
+    def is_valid(self) -> bool:
+        """Check if burned gas has minimum required data."""
+        return self.position is not None and not np.isnan(self.position)
+
+
+@dataclass
 class SpeciesData:
     """Chemical species data."""
     mass_fractions: Dict[str, float] = field(default_factory=dict)  # Y_i
