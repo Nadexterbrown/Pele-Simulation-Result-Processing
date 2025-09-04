@@ -21,6 +21,7 @@ except ImportError:
 
 class PeleDataExtractor(DataExtractor):
     """Pele-specific data extractor with unit conversion."""
+    """Pele-specific data extractor with unit conversion."""
 
     def __init__(self, unit_converter: UnitConverter, mechanism_file: Optional[str] = None):
         self.unit_converter = unit_converter
@@ -63,8 +64,10 @@ class PeleDataExtractor(DataExtractor):
             # Extract species data first (needed for Cantera calculations)
             species_data = self._extract_species_data(ray, sort_idx)
 
-            # Extract or calculate all variables using single functions per variable
-            velocity_x = self._get_x_velocity(ray, sort_idx, field_names_in_data)
+            # Extract velocity data
+            velocity_x, velocity_y = self._extract_velocity_data(ray, sort_idx)
+            
+            # Extract or calculate other variables
             density = self._get_density(ray, sort_idx, temperature, pressure, species_data, field_names_in_data, missing_fields)
             heat_release_rate = self._get_heat_release_rate(ray, sort_idx, temperature, pressure, species_data, field_names_in_data, missing_fields)
 
@@ -74,6 +77,7 @@ class PeleDataExtractor(DataExtractor):
                 pressure=pressure,
                 density=density,
                 velocity_x=velocity_x,
+                velocity_y=velocity_y,
                 heat_release_rate=heat_release_rate,
                 species_data=species_data
             )
@@ -181,6 +185,24 @@ class PeleDataExtractor(DataExtractor):
 
         return species_data if species_data.mass_fractions else None
 
+    def _extract_velocity_data(self, ray: Any, sort_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Extract x and y velocity components from Pele data."""
+        # Extract x velocity
+        try:
+            x_velocity_raw = ray["boxlib", "x_velocity"][sort_idx].to_value()
+            x_velocity = self.unit_converter.convert_value(x_velocity_raw, 'cm/s', 'm/s')
+        except Exception as e:
+            raise DataExtractionError("velocity_extraction", None, f"Failed to extract x_velocity: {str(e)}")
+        
+        # Extract y velocity
+        try:
+            y_velocity_raw = ray["boxlib", "y_velocity"][sort_idx].to_value()
+            y_velocity = self.unit_converter.convert_value(y_velocity_raw, 'cm/s', 'm/s')
+        except Exception as e:
+            raise DataExtractionError("velocity_extraction", None, f"Failed to extract y_velocity: {str(e)}")
+        
+        return x_velocity, y_velocity
+
     def _calculate_density(self, temperature: np.ndarray, pressure: np.ndarray,
                            species_data: Optional[SpeciesData]) -> np.ndarray:
         """Calculate density using ideal gas law or Cantera."""
@@ -191,28 +213,12 @@ class PeleDataExtractor(DataExtractor):
                     Y = {species: fractions[i] for species, fractions in species_data.mass_fractions.items()}
                     self.gas.TPY = temperature[i], pressure[i], Y
                     density[i] = self.gas.density
-                except:
-                    density[i] = pressure[i] / (287 * temperature[i])  # Air approximation
+                except Exception as e:
+                    raise DataExtractionError("thermodynamic_state", None, str(e))
             return density
         else:
-            # Ideal gas approximation
-            return pressure / (287 * temperature)
+            raise DataExtractionError("thermodynamic_state", None, str(e))
 
-    def _get_x_velocity(self, ray: Any, sort_idx: np.ndarray, field_names_in_data: List[str]) -> np.ndarray:
-        """Get X velocity (extract only - should always be in Pele data)."""
-        field_name = PELE_VAR_MAP['X Velocity']['Name']  # 'x_velocity'
-        
-        if field_name in field_names_in_data:
-            try:
-                velocity_raw = ray["boxlib", field_name][sort_idx].to_value()
-                velocity_ms = self.unit_converter.convert_value(velocity_raw, 'cm/s', 'm/s')
-                print(f"  Successfully extracted {field_name}: {len(velocity_ms)} points, range [{np.min(velocity_ms):.2f}, {np.max(velocity_ms):.2f}] m/s")
-                return velocity_ms
-            except Exception as e:
-                print(f"  Error extracting {field_name}: {e}")
-        
-        print(f"  Warning: {field_name} not found in data, using zeros")
-        return np.zeros(len(ray["boxlib", 'x'][sort_idx]))
 
     def _get_density(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
                     pressure: np.ndarray, species_data: Optional[SpeciesData],
@@ -233,9 +239,9 @@ class PeleDataExtractor(DataExtractor):
             print("  Calculating density using Cantera...")
             return self._calculate_with_cantera(temperature, pressure, species_data, 'density')
         else:
-            # Ideal gas approximation (air)
-            print("  Using ideal gas approximation for density")
-            return pressure / (287 * temperature)
+            # Cannot calculate density without Cantera
+            raise DataExtractionError("density_calculation", None, 
+                                     "Density field not found in data and Cantera not available or species data missing. Cannot use ideal gas assumptions.")
 
     def _get_heat_release_rate(self, ray: Any, sort_idx: np.ndarray, temperature: np.ndarray,
                               pressure: np.ndarray, species_data: Optional[SpeciesData],
@@ -441,17 +447,9 @@ class PeleDataExtractor(DataExtractor):
                     result[i] = 0.0
                     
             except Exception as e:
-                # Default values for failed calculations
-                defaults = {
-                    'density': pressure[i] / (287 * temperature[i]),
-                    'heat_release_rate': 0.0,
-                    'viscosity': 0.0,
-                    'conductivity': 0.0,
-                    'sound_speed': 300.0,
-                    'cp': 1005.0,
-                    'cv': 718.0
-                }
-                result[i] = defaults.get(property_name, 0.0)
+                # Raise error instead of using fallback values
+                raise DataExtractionError("cantera_calculation", None, 
+                                         f"Cantera calculation failed for {property_name} at point {i}: {str(e)}")
         
         return result
 
