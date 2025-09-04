@@ -63,7 +63,7 @@ except ImportError:
 yt.set_log_level(0)
 
 # Global configuration
-VERSION = "1.0.0"
+VERSION = "3.0.0"
 DEFAULT_FLAME_TEMP = 2500.0
 DEFAULT_SHOCK_PRESSURE_RATIO = 1.01
 
