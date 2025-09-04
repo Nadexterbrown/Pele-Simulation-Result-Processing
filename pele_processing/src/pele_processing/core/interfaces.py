@@ -277,6 +277,25 @@ class ThermodynamicCalculator(ABC):
         pass
 
 
+class BurnedGasAnalyzer(ABC):
+    """Interface for burned gas analysis."""
+
+    @abstractmethod
+    def analyze_burned_gas_properties(self, data: FieldData, flame_position: float,
+                                     flame_index: int) -> 'BurnedGasProperties':
+        """Analyze burned gas properties behind the flame.
+
+        Args:
+            data: 1D field data
+            flame_position: Position of flame front
+            flame_index: Index of flame in data arrays
+
+        Returns:
+            Burned gas properties including thermodynamic state and velocity
+        """
+        pass
+
+
 # =============================================================================
 # Visualization Layer Interfaces
 # =============================================================================

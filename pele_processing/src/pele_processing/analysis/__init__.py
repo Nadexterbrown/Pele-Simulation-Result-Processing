@@ -17,6 +17,11 @@ from .thermodynamics import (
     CanteraThermodynamicCalculator, create_thermodynamic_calculator
 )
 
+# Burned gas analysis
+from .burned_gas import (
+    PeleBurnedGasAnalyzer, create_burned_gas_analyzer
+)
+
 # Geometry analysis
 from .geometry import (
     GeometryAnalyzer, FlameGeometryAnalyzer, create_geometry_analyzer
@@ -34,6 +39,10 @@ __all__ = [
     # Thermodynamics
     'CanteraThermodynamicCalculator',
     'create_thermodynamic_calculator',
+
+    # Burned gas
+    'PeleBurnedGasAnalyzer',
+    'create_burned_gas_analyzer',
 
     # Geometry
     'GeometryAnalyzer',

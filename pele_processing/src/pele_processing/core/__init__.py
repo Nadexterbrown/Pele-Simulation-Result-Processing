@@ -17,7 +17,7 @@ from .domain import (
     Point2D, Point3D, BoundingBox,
 
     # Physical properties
-    ThermodynamicState, FlameProperties, ShockProperties, GasProperties,
+    ThermodynamicState, FlameProperties, ShockProperties, GasProperties, BurnedGasProperties,
 
     # Data structures
     SpeciesData, FieldData, DatasetInfo,
@@ -35,7 +35,7 @@ from .interfaces import (
     DataLoader, DataExtractor, DataValidator,
 
     # Analysis layer
-    WaveTracker, FlameAnalyzer, ShockAnalyzer, ThermodynamicCalculator,
+    WaveTracker, FlameAnalyzer, ShockAnalyzer, ThermodynamicCalculator, BurnedGasAnalyzer,
 
     # Visualization layer
     FrameGenerator, AnimationBuilder, OutputFormatter,
@@ -57,7 +57,7 @@ from .exceptions import (
 
     # Analysis layer exceptions
     AnalysisError, WaveNotFoundError, FlameAnalysisError, ShockAnalysisError,
-    ThermodynamicError, ConvergenceError,
+    BurnedGasAnalysisError, ThermodynamicError, ConvergenceError,
 
     # Visualization exceptions
     VisualizationError, PlotGenerationError, AnimationError, OutputFormatError,
@@ -81,13 +81,13 @@ from .container import (
 __all__ = [
     # Domain
     'WaveType', 'Direction', 'Point2D', 'Point3D', 'BoundingBox',
-    'ThermodynamicState', 'FlameProperties', 'ShockProperties', 'GasProperties',
+    'ThermodynamicState', 'FlameProperties', 'ShockProperties', 'GasProperties', 'BurnedGasProperties',
     'SpeciesData', 'FieldData', 'DatasetInfo', 'ProcessingResult', 'ProcessingBatch',
     'AnimationFrame', 'VisualizationRequest',
 
     # Interfaces
     'DataLoader', 'DataExtractor', 'DataValidator',
-    'WaveTracker', 'FlameAnalyzer', 'ShockAnalyzer', 'ThermodynamicCalculator',
+    'WaveTracker', 'FlameAnalyzer', 'ShockAnalyzer', 'ThermodynamicCalculator', 'BurnedGasAnalyzer',
     'FrameGenerator', 'AnimationBuilder', 'OutputFormatter',
     'WorkDistributor', 'ParallelCoordinator',
     'ConfigurationLoader', 'Logger', 'UnitConverter',

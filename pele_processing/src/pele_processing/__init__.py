@@ -9,13 +9,13 @@ Supports flame analysis, shock detection, thermodynamic calculations, and visual
 from .core import (
     # Domain models
     WaveType, Direction, Point2D, Point3D, BoundingBox,
-    ThermodynamicState, FlameProperties, ShockProperties, GasProperties,
+    ThermodynamicState, FlameProperties, ShockProperties, GasProperties, BurnedGasProperties,
     SpeciesData, FieldData, DatasetInfo, ProcessingResult, ProcessingBatch,
     AnimationFrame, VisualizationRequest,
 
     # Interfaces
     DataLoader, DataExtractor, DataValidator,
-    WaveTracker, FlameAnalyzer, ShockAnalyzer, ThermodynamicCalculator,
+    WaveTracker, FlameAnalyzer, ShockAnalyzer, ThermodynamicCalculator, BurnedGasAnalyzer,
     FrameGenerator, AnimationBuilder, OutputFormatter,
     WorkDistributor, ParallelCoordinator,
     ConfigurationLoader, Logger, UnitConverter,
@@ -53,6 +53,7 @@ from .data import (
 from .analysis import (
     PeleFlameAnalyzer, create_flame_analyzer,
     PeleShockAnalyzer, create_shock_analyzer,
+    PeleBurnedGasAnalyzer, create_burned_gas_analyzer,
     CanteraThermodynamicCalculator, create_thermodynamic_calculator,
     GeometryAnalyzer, FlameGeometryAnalyzer, create_geometry_analyzer
 )
@@ -226,7 +227,7 @@ __all__ = [
     'create_data_loader', 'create_data_extractor', 'create_standard_processor',
 
     # Analysis
-    'create_flame_analyzer', 'create_shock_analyzer', 'create_thermodynamic_calculator',
+    'create_flame_analyzer', 'create_shock_analyzer', 'create_burned_gas_analyzer', 'create_thermodynamic_calculator',
 
     # Parallel
     'create_processing_strategy', 'create_default_adaptive_strategy',
