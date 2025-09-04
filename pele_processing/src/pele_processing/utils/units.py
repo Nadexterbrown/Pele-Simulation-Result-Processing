@@ -18,6 +18,8 @@ class UnitConverter(UnitConverterInterface):
         'cm': 1e-2, 'm': 1.0, 'mm': 1e-3, 'km': 1e3,
         # Mass
         'g': 1e-3, 'kg': 1.0, 'mg': 1e-6,
+        # Force
+        'dyne': 1e-5, 'N': 1.0,  # dyne = 1e-5 N
         # Time
         's': 1.0, 'ms': 1e-3, 'us': 1e-6, 'ns': 1e-9,
         # Temperature
