@@ -96,6 +96,11 @@ class FlameProperties:
     reynolds_number: Optional[float] = None
     thermodynamic_state: Optional[ThermodynamicState] = None
     contour_points: Optional[np.ndarray] = None  # 2D contour coordinates
+    # Additional data for thickness plotting
+    region_grid: Optional[np.ndarray] = None  # Local grid around flame
+    region_temperature: Optional[np.ndarray] = None  # Temperature field on grid
+    normal_line: Optional[np.ndarray] = None  # Normal line coordinates
+    interpolated_temperatures: Optional[np.ndarray] = None  # Temperatures along normal line
 
     def is_valid(self) -> bool:
         """Check if flame has minimum required data."""

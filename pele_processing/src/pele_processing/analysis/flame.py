@@ -20,15 +20,9 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         """Extract flame contour using YT parallel processing with fallbacks."""
         # Try YT covering grid extraction first (fastest when flame_pos known)
         try:
-            return self._extract_yt_contour(dataset, flame_pos)
+            return self._extract_contour(dataset, flame_pos)
         except Exception as e:
             print(f"YT extraction failed: {e}")
-            
-        # Fallback to local manual extraction around known flame position
-        try:
-            return self._extract_manual_contour(dataset, flame_pos)
-        except Exception as e:
-            print(f"Manual extraction failed: {e}")
             return np.array([])
 
     def sort_contour_by_nearest_neighbors(self, points: np.ndarray, dataset: Any) -> Tuple[
@@ -53,8 +47,13 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         return self._sort_by_nearest_neighbors(points, dataset)
 
     def calculate_flame_thickness(self, dataset: Any, contour_points: Optional[np.ndarray],
-                                 center_location: float) -> float:
-        """Calculate flame thickness using original Pele-2D-Data-Processing method."""
+                                 center_location: float) -> tuple:
+        """Calculate flame thickness using original Pele-2D-Data-Processing method.
+        
+        Returns:
+            tuple: (flame_thickness, plotting_data_dict) where plotting_data_dict contains
+                   region_grid, region_temperature, normal_line, interpolated_temperatures
+        """
         try:
             if contour_points is None or len(contour_points) == 0:
                 raise FlameAnalysisError("thickness", "No contour points provided")
@@ -91,13 +90,21 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             
             flame_thickness_val = (np.max(interpolator(normal_line)) - np.min(interpolator(normal_line))) / np.max(temp_grad)
             
-            return flame_thickness_val
+            # Store plotting data
+            plotting_data = {
+                'region_grid': region_grid,
+                'region_temperature': region_temperature,
+                'normal_line': normal_line,
+                'interpolated_temperatures': interpolator(normal_line)
+            }
+            
+            return flame_thickness_val, plotting_data
 
         except Exception as e:
             print(f"Error: Unable to calculate flame thickness: {e}")
-            return np.nan
+            return np.nan, None
 
-    def _extract_yt_contour(self, dataset: Any, flame_pos: float = None) -> np.ndarray:
+    def _extract_contour(self, dataset: Any, flame_pos: float = None) -> np.ndarray:
         """Extract flame contour using YT's covering grid + extract_isocontours."""
         import yt
         
@@ -114,24 +121,25 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             
             if flame_pos is not None:
                 # Create focused box region around flame (±5mm window)
-                flame_window = 5e-3  # 5mm in meters
+                flame_window_left = 2.5e-3  # 5mm in meters
+                flame_window_right = 0.5e-3  # 5mm in meters
                 flame_pos_cm = flame_pos * 100  # Convert to cm for YT
                 
                 # Create focused left/right edges (±5mm around flame)
                 # Use the full Y domain but ensure X bounds are properly clamped
                 focused_left = [
-                    max(domain_left[0], flame_pos_cm - flame_window * 100),  # Don't go outside domain
+                    max(domain_left[0], flame_pos_cm - flame_window_left * 100),  # Don't go outside domain
                     domain_left[1],
                     domain_left[2]
                 ]
                 focused_right = [
-                    min(domain_right[0], flame_pos_cm + flame_window * 100),
+                    min(domain_right[0], flame_pos_cm + flame_window_right * 100),
                     domain_right[1], 
                     domain_right[2]
                 ]
                 
                 print(f"Creating focused box region around flame at {flame_pos:.4f}m")
-                print(f"Box bounds: x=[{focused_left[0]:.1f}, {focused_right[0]:.1f}]cm, window: ±{flame_window*1000:.1f}mm")
+                print(f"Box bounds: x=[{focused_left[0]:.1f}, {focused_right[0]:.1f}]cm, window: -{flame_window_left*1000:.1f}/+{flame_window_right*1000:.1f}mm")
             else:
                 # Fallback to broader regional extraction (2.5% buffer from each end)
                 flame_buffer = 0.025
@@ -184,148 +192,6 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         
         
         raise ValueError("All YT contour extraction methods failed")
-
-    def _extract_manual_contour(self, dataset: Any, flame_pos: float = None) -> np.ndarray:
-        """Manual contour extraction focused around known flame location."""
-        from concurrent.futures import ThreadPoolExecutor
-        from matplotlib.tri import Triangulation
-        import matplotlib.pyplot as plt
-        from scipy.interpolate import griddata
-        
-        max_level = dataset.index.max_level
-        
-        # Filter highest level grids by average x-distance from flame position
-        relevant_grids = []
-        for grid in dataset.index.grids:
-            if grid.Level == max_level:
-                if flame_pos is not None:
-                    # Calculate average x position of this grid (convert cm to m)
-                    grid_x_avg = (grid.LeftEdge[0].to_value() + grid.RightEdge[0].to_value()) / 200  # /200 = /2 then /100
-                    flame_distance = abs(grid_x_avg - flame_pos)
-                    
-                    # Only include grids within 5mm of flame position
-                    if flame_distance <= 5e-3:  # 5mm in meters
-                        relevant_grids.append(grid)
-                else:
-                    # If no flame position known, include all highest level grids
-                    relevant_grids.append(grid)
-        
-        total_grids = len([g for g in dataset.index.grids if g.Level == max_level])
-        if flame_pos is not None:
-            print(f"Filtering grids around flame at {flame_pos:.4f}m: using {len(relevant_grids)}/{total_grids} grids (within 5mm)")
-        else:
-            print(f"No flame position provided, using all {len(relevant_grids)} highest level grids")
-        
-        if len(relevant_grids) == 0:
-            raise ValueError(f"No relevant grids found around flame position {flame_pos}")
-        
-        def extract_grid_data(grid):
-            """Extract data from a single grid."""
-            try:
-                x = grid["boxlib", "x"].to_value().flatten()
-                y = grid["boxlib", "y"].to_value().flatten() 
-                temp = grid["boxlib", "Temp"].flatten()
-                return x, y, temp
-            except Exception:
-                return None, None, None
-        
-        # Use ThreadPoolExecutor for parallel grid data extraction
-        x_coords_list, y_coords_list, temperatures_list = [], [], []
-        
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            results = list(executor.map(extract_grid_data, relevant_grids))
-        
-        # Collect results
-        for x, y, temp in results:
-            if x is not None:
-                x_coords_list.append(x)
-                y_coords_list.append(y)
-                temperatures_list.append(temp)
-        
-        if not x_coords_list:
-            return np.array([])
-            
-        x_coords = np.concatenate(x_coords_list)
-        y_coords = np.concatenate(y_coords_list) 
-        temperatures = np.concatenate(temperatures_list)
-        
-        # Sample data if too large
-        if len(x_coords) > 100000:
-            indices = np.random.choice(len(x_coords), 100000, replace=False)
-            x_coords = x_coords[indices]
-            y_coords = y_coords[indices]
-            temperatures = temperatures[indices]
-        
-        # Create triangulation and extract contour
-        try:
-            triangulation = Triangulation(x_coords, y_coords)
-            contour = plt.tricontour(triangulation, temperatures, levels=[self.flame_temperature])
-            
-            # Extract paths from contour (newer matplotlib API)
-            paths = []
-            try:
-                # Try newer matplotlib API first
-                if hasattr(contour, 'get_paths'):
-                    paths = contour.get_paths()
-                elif hasattr(contour, 'collections') and contour.collections:
-                    # Fallback to older API
-                    paths = contour.collections[0].get_paths()
-                elif hasattr(contour, 'allsegs') and contour.allsegs:
-                    # Even older API - convert segments to paths
-                    from matplotlib.path import Path
-                    for level_segs in contour.allsegs:
-                        for seg in level_segs:
-                            if len(seg) > 0:
-                                paths.append(Path(seg))
-            except Exception as path_error:
-                print(f"Path extraction failed: {path_error}")
-                paths = []
-            
-            if paths:
-                contour_points = np.vstack([path.vertices for path in paths])
-                return contour_points / 100  # Convert cm to m
-                    
-        except Exception as e:
-            print(f"Triangulation failed, trying grid interpolation: {e}")
-            
-        # Final fallback: grid interpolation
-        try:
-            n_points = min(int(5e3), len(x_coords) // 10)
-            xi = np.linspace(np.min(x_coords), np.max(x_coords), n_points)
-            yi = np.linspace(np.min(y_coords), np.max(y_coords), n_points)
-            xi_grid, yi_grid = np.meshgrid(xi, yi)
-            
-            temperature_grid = griddata((x_coords, y_coords), temperatures, (xi_grid, yi_grid), method='linear')
-            temperature_grid = np.nan_to_num(temperature_grid, nan=np.min(temperatures))
-            
-            triangulation = Triangulation(xi_grid.flatten(), yi_grid.flatten())
-            contour = plt.tricontour(triangulation, temperature_grid.flatten(), levels=[self.flame_temperature])
-            
-            # Extract paths from contour (handle different matplotlib versions)
-            paths = []
-            try:
-                if hasattr(contour, 'get_paths'):
-                    paths = contour.get_paths()
-                elif hasattr(contour, 'collections') and contour.collections:
-                    paths = contour.collections[0].get_paths()
-                elif hasattr(contour, 'allsegs') and contour.allsegs:
-                    from matplotlib.path import Path
-                    for level_segs in contour.allsegs:
-                        for seg in level_segs:
-                            if len(seg) > 0:
-                                paths.append(Path(seg))
-            except Exception as path_error:
-                print(f"Grid interpolation path extraction failed: {path_error}")
-            
-            if paths:
-                contour_points = np.vstack([path.vertices for path in paths])
-                return contour_points / 100  # Convert cm to m
-        
-        except Exception as e:
-            print(f"Grid interpolation failed: {e}")
-            
-        return np.array([])
-
 
     def _sort_by_nearest_neighbors(self, points: np.ndarray, dataset: Any) -> Tuple[
         np.ndarray, List[np.ndarray], float]:
@@ -726,7 +592,7 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             return np.array([])
         return np.gradient(positions, times)
 
-    def analyze_flame_properties(self, dataset: Any, data: FieldData) -> FlameProperties:
+    def analyze_flame_properties(self, dataset: Any, data: FieldData, extraction_location: float = None) -> FlameProperties:
         """Complete flame analysis matching original flame_geometry function."""
         # Find flame position from 1D data
         flame_idx, flame_pos = self.find_wave_position(data, WaveType.FLAME)
@@ -773,8 +639,23 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
 
                 # Calculate flame thickness if contour available
                 try:
-                    center_location = flame_pos  # Use 1D flame position as center
-                    properties.thickness = self.calculate_flame_thickness(dataset, sorted_points, center_location)
+                    # Use the y-coordinate from the 1D extraction location for thickness calculation
+                    if extraction_location is not None:
+                        center_location = extraction_location  # This is the y-coordinate of the 1D ray
+                    else:
+                        # Fallback: use flame x-position (not ideal, but maintains backward compatibility)
+                        center_location = flame_pos
+                        print("Warning: No extraction location provided for thickness calculation, using flame position as fallback")
+                    
+                    thickness_result, plotting_data = self.calculate_flame_thickness(dataset, sorted_points, center_location)
+                    properties.thickness = thickness_result
+                    
+                    # Store plotting data for later visualization
+                    if plotting_data is not None:
+                        properties.region_grid = plotting_data.get('region_grid')
+                        properties.region_temperature = plotting_data.get('region_temperature')
+                        properties.normal_line = plotting_data.get('normal_line')
+                        properties.interpolated_temperatures = plotting_data.get('interpolated_temperatures')
                 except Exception as e:
                     print(f"Flame thickness calculation failed: {e}")
                     properties.thickness = np.nan
