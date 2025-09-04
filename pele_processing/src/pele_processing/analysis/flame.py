@@ -108,24 +108,18 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         """Extract flame contour using YT's covering grid + extract_isocontours."""
         import yt
         
-        # Enable YT parallelism
-        try:
-            yt.enable_parallelism()
-        except:
-            pass  # Already enabled or mpi4py not available
-        
         # Method 1: Smart box region extraction (focused around flame when known)
         try:
             domain_left = dataset.domain_left_edge.to_value()
             domain_right = dataset.domain_right_edge.to_value()
             
             if flame_pos is not None:
-                # Create focused box region around flame (±5mm window)
+                # Create focused box region around flame (+/-5mm window)
                 flame_window_left = 2.5e-3  # 5mm in meters
                 flame_window_right = 0.5e-3  # 5mm in meters
                 flame_pos_cm = flame_pos * 100  # Convert to cm for YT
                 
-                # Create focused left/right edges (±5mm around flame)
+                # Create focused left/right edges (+/-5mm around flame)
                 # Use the full Y domain but ensure X bounds are properly clamped
                 focused_left = [
                     max(domain_left[0], flame_pos_cm - flame_window_left * 100),  # Don't go outside domain
@@ -158,7 +152,7 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                 focused_left[1] < domain_left[1] or focused_right[1] > domain_right[1]):
                 print("Warning: Box bounds exceed domain, falling back to full domain extraction")
                 raise ValueError("Box bounds exceed domain")
-            
+
             box_region = dataset.box(left_edge=focused_left, right_edge=focused_right)
             contours = box_region.extract_isocontours("Temp", self.flame_temperature)
             
@@ -541,12 +535,12 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
 
             for i in range(num_rows):
                 row_data = cg['boxlib', f'rho_omega_{transport_species}'][:, i, 0].to_value()
-                # Convert from g/(cm³·s) to kg/(m³·s)
+                # Convert from g/(cm^3*s) to kg/(m^3*s)
                 row_data *= 1000
                 total_consumption += np.sum(np.abs(row_data)) * dx * dy
 
             # Calculate burning velocity
-            rho_reactant = cg["boxlib", f"rho_{transport_species}"].to_value()[-1, 0, 0] * 1000  # Convert to kg/m³
+            rho_reactant = cg["boxlib", f"rho_{transport_species}"].to_value()[-1, 0, 0] * 1000  # Convert to kg/m^3
             domain_height = (dataset.domain_right_edge[1].to_value() - dataset.domain_left_edge[1].to_value()) / 100
 
             burning_velocity = total_consumption / (rho_reactant * domain_height)
@@ -620,7 +614,7 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                     sound_speed=sound_speed
                 )
                 
-                print(f"  Flame thermodynamic state: T={temp:.1f}K, P={pressure:.0f}Pa, ρ={density:.3f}kg/m³")
+                print(f"  Flame thermodynamic state: T={temp:.1f}K, P={pressure:.0f}Pa, rho={density:.3f}kg/m^3")
             else:
                 print("  Could not extract thermodynamic state: invalid flame index")
                 
