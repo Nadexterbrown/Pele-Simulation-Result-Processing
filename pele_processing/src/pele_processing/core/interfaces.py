@@ -86,24 +86,6 @@ class DataExtractor(ABC):
         pass
 
     @abstractmethod
-    def extract_2d_contour(self, dataset: Any, field_name: str,
-                           iso_value: float) -> np.ndarray:
-        """Extract 2D iso-contour from dataset.
-
-        Args:
-            dataset: Loaded dataset object
-            field_name: Name of field for contour extraction
-            iso_value: Value for iso-contour
-
-        Returns:
-            Array of contour points [[x1,y1], [x2,y2], ...]
-
-        Raises:
-            ExtractionError: If contour extraction fails
-        """
-        pass
-
-    @abstractmethod
     def extract_thermodynamic_state(self, dataset: Any, location: Point2D) -> ThermodynamicState:
         """Extract thermodynamic state at specific location.
 
