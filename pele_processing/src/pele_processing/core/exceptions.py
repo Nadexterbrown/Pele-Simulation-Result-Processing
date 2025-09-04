@@ -144,6 +144,17 @@ class ShockAnalysisError(AnalysisError):
         self.analysis_type = analysis_type
 
 
+class BurnedGasAnalysisError(AnalysisError):
+    """Exception raised during burned gas analysis."""
+
+    def __init__(self, analysis_type: str, reason: str):
+        super().__init__(
+            f"Burned gas {analysis_type} analysis failed: {reason}",
+            {"analysis_type": analysis_type, "reason": reason}
+        )
+        self.analysis_type = analysis_type
+
+
 class ThermodynamicError(AnalysisError):
     """Exception raised during thermodynamic calculations."""
 
