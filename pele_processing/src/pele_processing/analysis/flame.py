@@ -586,35 +586,46 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             return np.array([])
         return np.gradient(positions, times)
 
-    def analyze_flame_properties(self, dataset: Any, data: FieldData, extraction_location: float = None) -> FlameProperties:
+    def analyze_flame_properties(self, dataset: Any, data: FieldData, extraction_location: float = None, thermo_offset: float = 10e-6) -> FlameProperties:
         """Complete flame analysis matching original flame_geometry function."""
         # Find flame position from 1D data
         flame_idx, flame_pos = self.find_wave_position(data, WaveType.FLAME)
 
         properties = FlameProperties(position=flame_pos, index=flame_idx)
 
-        # Extract thermodynamic state at flame location from 1D data
+        # Extract thermodynamic state at flame location with offset from 1D data
         try:
             from ..core.domain import ThermodynamicState
             
-            # Extract state directly from 1D data at flame index
+            # Calculate offset position (10 microns ahead of flame)
+            thermo_position = flame_pos + thermo_offset
+            
+            # Find index closest to the offset position
             if flame_idx is not None and flame_idx < len(data.coordinates):
-                temp = data.temperature[flame_idx]
-                pressure = data.pressure[flame_idx]
-                density = data.density[flame_idx]
+                # Find the index closest to the thermodynamic offset position
+                thermo_idx = np.argmin(np.abs(data.coordinates - thermo_position))
                 
-                # Calculate sound speed from ideal gas relations
-                # c = sqrt(gamma * R * T), assuming gamma = 1.4 and R = pressure/(density*T)
-                sound_speed = np.sqrt(1.4 * pressure / density)
-                
-                properties.thermodynamic_state = ThermodynamicState(
-                    temperature=temp,
-                    pressure=pressure, 
-                    density=density,
-                    sound_speed=sound_speed
-                )
-                
-                print(f"  Flame thermodynamic state: T={temp:.1f}K, P={pressure:.0f}Pa, rho={density:.3f}kg/m^3")
+                # Ensure the index is valid
+                if thermo_idx < len(data.coordinates):
+                    temp = data.temperature[thermo_idx]
+                    pressure = data.pressure[thermo_idx]
+                    density = data.density[thermo_idx]
+                    
+                    # Calculate sound speed from ideal gas relations
+                    # c = sqrt(gamma * R * T), assuming gamma = 1.4 and R = pressure/(density*T)
+                    sound_speed = np.sqrt(1.4 * pressure / density)
+                    
+                    properties.thermodynamic_state = ThermodynamicState(
+                        temperature=temp,
+                        pressure=pressure, 
+                        density=density,
+                        sound_speed=sound_speed
+                    )
+                    
+                    print(f"  Flame thermodynamic state (offset +{thermo_offset*1e6:.1f}um): T={temp:.1f}K, P={pressure:.0f}Pa, rho={density:.3f}kg/m^3")
+                    print(f"  Extraction location: {data.coordinates[thermo_idx]:.6f}m vs flame at {flame_pos:.6f}m")
+                else:
+                    print("  Could not extract thermodynamic state: offset position out of bounds")
             else:
                 print("  Could not extract thermodynamic state: invalid flame index")
                 

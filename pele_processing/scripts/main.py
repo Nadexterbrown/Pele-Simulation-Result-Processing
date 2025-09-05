@@ -106,9 +106,7 @@ def setup_directories(output_base: Path) -> Dict[str, Path]:
     """Create organized output directory structure"""
     directories = {
         'base': output_base,
-        'data': output_base / 'Data-Files',
         'animations': output_base / 'Animation-Frames',
-        'plots': output_base / 'Individual-Plots',
     }
     
     # Animation subdirectories
@@ -173,8 +171,8 @@ def analyze_flame_properties(dataset, field_data: FieldData, config: ProcessingC
         # Create flame analyzer
         flame_analyzer = create_flame_analyzer(flame_temperature=config.flame_temperature)
         
-        # Perform comprehensive flame analysis
-        flame_properties = flame_analyzer.analyze_flame_properties(dataset, field_data, config.extraction_location)
+        # Perform comprehensive flame analysis with thermodynamic offset
+        flame_properties = flame_analyzer.analyze_flame_properties(dataset, field_data, config.extraction_location, config.flame_thermo_offset)
         results['flame_properties'] = flame_properties
         
         # Extract individual properties with error handling
