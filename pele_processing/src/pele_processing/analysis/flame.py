@@ -316,117 +316,155 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             return np.array(unique_points)
 
     def _extract_simulation_grid(self, dataset: Any, flame_x: float, flame_y: float):
-        """Extract simulation grid using original method."""
-        # Step 1: Collect the max level grids
+        """Extract simulation grid using local covering grid around flame location."""
+        # Get max level and smallest grid spacing
         max_level = dataset.index.max_level
-        grids = [grid for grid in dataset.index.grids if grid.Level == max_level]
+        dx = dataset.index.get_smallest_dx().to_value() / 100  # Convert cm to m
+        dy = dataset.index.get_smallest_dx().to_value() / 100  # Convert cm to m
+        
+        # Create local box region around flame (25 grid points on each side)
+        grid_extent = 25
+        box_width_x = grid_extent * dx
+        box_width_y = grid_extent * dy
+        
+        # Define box boundaries (flame_x, flame_y are already in meters)
+        left_edge = [
+            (flame_x - box_width_x) * 100,  # Convert back to cm for YT
+            (flame_y - box_width_y) * 100,
+            dataset.domain_left_edge[2].to_value()
+        ]
+        right_edge = [
+            (flame_x + box_width_x) * 100,  # Convert back to cm for YT
+            (flame_y + box_width_y) * 100,
+            dataset.domain_right_edge[2].to_value()
+        ]
+        
+        # Ensure bounds don't exceed domain
+        domain_left = dataset.domain_left_edge.to_value()
+        domain_right = dataset.domain_right_edge.to_value()
+        
+        left_edge[0] = max(left_edge[0], domain_left[0])
+        left_edge[1] = max(left_edge[1], domain_left[1])
+        right_edge[0] = min(right_edge[0], domain_right[0])
+        right_edge[1] = min(right_edge[1], domain_right[1])
+        
+        # Calculate dimensions for covering grid (ensure at least 50x50 grid)
+        dims_x = max(50, int((right_edge[0] - left_edge[0]) / dataset.index.get_smallest_dx().to_value()))
+        dims_y = max(50, int((right_edge[1] - left_edge[1]) / dataset.index.get_smallest_dx().to_value()))
+        dims = [dims_x, dims_y, 1]
+        
+        print(f"  Creating local covering grid: {dims_x}x{dims_y} around flame at ({flame_x:.6f}, {flame_y:.6f})m")
+        
+        try:
+            # Create covering grid
+            cg = dataset.covering_grid(
+                level=max_level,
+                left_edge=left_edge,
+                dims=dims,
+                fields=[('boxlib', 'x'), ('boxlib', 'y'), 'Temp']
+            )
+            
+            # Extract grid data
+            subgrid_x = cg['boxlib', 'x'].to_value().flatten() / 100  # Convert cm to m
+            subgrid_y = cg['boxlib', 'y'].to_value().flatten() / 100  # Convert cm to m
+            subgrid_temperatures = cg['Temp'].to_value().flatten()
+            
+            print(f"  Extracted {len(subgrid_x)} grid points from local covering grid")
+            
+            return subgrid_x, subgrid_y, subgrid_temperatures
+            
+        except Exception as e:
+            print(f"  Warning: Covering grid extraction failed: {e}")
+            print("  Falling back to original grid-based method...")
+            
+            # Fallback to original method
+            max_level = dataset.index.max_level
+            grids = [grid for grid in dataset.index.grids if grid.Level == max_level]
 
-        # Step 2: Pre-allocate lists for subgrid data and filtered grids
-        subgrid_x, subgrid_y, subgrid_temperatures = [], [], []
-        filtered_grids = []
+            subgrid_x, subgrid_y, subgrid_temperatures = [], [], []
 
-        # Step 3: Pre-extract the grid data once for efficiency
-        grid_data = []
-        for temp_grid in grids:
-            x = temp_grid["boxlib", "x"].to_value().flatten()
-            y = temp_grid["boxlib", "y"].to_value().flatten()
-            temp = temp_grid["Temp"].flatten()
-            grid_data.append((x, y, temp))
-
-        # Step 4: Filter grids based on mean x difference (original method)
-        for i, (x, y, temp) in enumerate(grid_data):
-            # Calculate the mean x value for the current grid
-            current_mean_x = np.mean(x)
-            if i < len(grids) - 1:
+            for temp_grid in grids:
+                x = temp_grid["boxlib", "x"].to_value().flatten()
+                y = temp_grid["boxlib", "y"].to_value().flatten()
+                temp = temp_grid["Temp"].flatten()
+                
+                # Calculate the mean x value for the current grid
+                current_mean_x = np.mean(x)
                 # If the difference in mean x values is too large, skip the current grid
                 if current_mean_x > flame_x * 100 + 1e-2:  # Convert flame_x to cm for comparison
                     continue
 
-            # If this grid is not skipped, append it to the filtered list
-            filtered_grids.append(grids[i])
-            # Collect the values from this grid
-            subgrid_x.extend(x)
-            subgrid_y.extend(y)
-            subgrid_temperatures.extend(temp)
+                # Collect the values from this grid
+                subgrid_x.extend(x)
+                subgrid_y.extend(y)
+                subgrid_temperatures.extend(temp)
 
-        # Convert to cm for consistency with original
-        subgrid_x = np.array(subgrid_x) / 100  # Convert to m
-        subgrid_y = np.array(subgrid_y) / 100  # Convert to m
-        subgrid_temperatures = np.array(subgrid_temperatures)
+            # Convert to m for consistency
+            subgrid_x = np.array(subgrid_x) / 100  # Convert cm to m
+            subgrid_y = np.array(subgrid_y) / 100  # Convert cm to m
+            subgrid_temperatures = np.array(subgrid_temperatures)
 
-        return subgrid_x, subgrid_y, subgrid_temperatures
+            return subgrid_x, subgrid_y, subgrid_temperatures
 
     def _create_subgrid(self, subgrid_x, subgrid_y, subgrid_temperatures, flame_x, flame_y, 
                        flame_x_arr, flame_y_arr, flame_x_arr_idx, flame_y_arr_idx):
-        """Create subgrid using original method."""
-        # Step 1: Determine the number of indices to the left and right of the flame_x_idx
-        left_x_indices = flame_x_arr_idx
-        right_x_indices = len(flame_x_arr) - flame_x_arr_idx - 1
-        # Determine the smallest number of cells for the x indices
-        x_indices = min(left_x_indices, right_x_indices)
-
-        # Step 2: Determine the number of indices to the top and bottom of the flame_y_idx
-        top_y_indices = flame_y_arr_idx
-        bottom_y_indices = len(flame_y_arr) - flame_y_arr_idx - 1
-        # Determine the smallest number of cells for the y indices
-        y_indices = min(top_y_indices, bottom_y_indices)
-
-        # Step 3: Determine the subgrid bin size
-        if min(x_indices, y_indices) < 11:
-            subgrid_bin_size = min(x_indices, y_indices)
-        else:
-            subgrid_bin_size = 11
-
-        # Step 4: Create subgrid with the appropriate number of indices on either side of flame_x_idx and flame_y_idx
-        subgrid_flame_x = flame_x_arr[flame_x_arr_idx - subgrid_bin_size:flame_x_arr_idx + subgrid_bin_size + 1]
-        subgrid_flame_y = flame_y_arr[flame_y_arr_idx - subgrid_bin_size:flame_y_arr_idx + subgrid_bin_size + 1]
-
-        # Step 5: Create a grid of temperature values corresponding to the subgrid (subgrid_flame_x, subgrid_flame_y)
-        subgrid_temperatures_grid = np.full((len(subgrid_flame_y), len(subgrid_flame_x)), np.nan)
-
-        # Step 6: Create a grid of temperature values corresponding to the subgrid (subgrid_flame_x, subgrid_flame_y)
-        # Iterate over the subgrid (x, y) pairs and find the corresponding temperature from the collective data
-        for i, y in enumerate(subgrid_flame_y):
-            for j, x in enumerate(subgrid_flame_x):
-                # Find the index in the collective data that corresponds to the current (x, y)
-                matching_indices = np.where((subgrid_x == x) & (subgrid_y == y))
-
-                if len(matching_indices[0]) > 0:
-                    # If a match is found, assign the temperature at the (x, y) position
-                    try:
-                        subgrid_temperatures_grid[i, j] = subgrid_temperatures[matching_indices[0][0]]
-                    except:
-                        subgrid_temperatures_grid[i, j] = np.nan
-
-        region_grid = np.dstack(np.meshgrid(subgrid_flame_x, subgrid_flame_y)).reshape(-1, 2)
-        region_temperature = subgrid_temperatures_grid.reshape(np.meshgrid(subgrid_flame_x, subgrid_flame_y)[0].shape)
-
-        # Original rotation/flipping logic to match grid orientation
-        from scipy.interpolate import RegularGridInterpolator
+        """Create subgrid using LinearNDInterpolator with covering grid data."""
+        from scipy.interpolate import LinearNDInterpolator
         
-        break_outer = False
-        for i in range(2):
-            if i == 0:
-                temp_arr = region_temperature
-            else:
-                temp_arr = np.flip(region_temperature, axis=i - 1)
-
-            for j in range(4):
-                temp_grid = np.rot90(temp_arr, k=j)
-
-                # Compute alignment score (difference between grid and contour points)
-                interpolator = RegularGridInterpolator((np.unique(region_grid[:, 0]), np.unique(region_grid[:, 1])),
-                                                       temp_grid, bounds_error=False, fill_value=None)
-                contour_temps = interpolator(region_grid).reshape(
-                    np.meshgrid(subgrid_flame_x, subgrid_flame_y)[0].shape)
-
-                if np.all(contour_temps == region_temperature):
-                    break_outer = True
-                    break  # Break out of the inner loop
-
-            if break_outer:
-                break  # Break out of the outer loop
-
+        print(f"  Creating interpolator with {len(subgrid_x)} covering grid points around flame")
+        
+        # Step 1: Use the covering grid data directly with LinearNDInterpolator
+        # Filter out any invalid temperature values
+        valid_mask = np.isfinite(subgrid_temperatures)
+        
+        if np.sum(valid_mask) < 3:
+            print(f"  Error: Insufficient valid temperature data ({np.sum(valid_mask)} points)")
+            return None, None, None
+        
+        valid_points = np.column_stack((subgrid_x[valid_mask], subgrid_y[valid_mask]))
+        valid_temps = subgrid_temperatures[valid_mask]
+        
+        # Step 2: Create LinearNDInterpolator directly with the covering grid data
+        interpolator = LinearNDInterpolator(valid_points, valid_temps, fill_value=np.nan)
+        
+        # Step 3: Create region grid for analysis (local window around flame)
+        # Determine analysis window size based on grid resolution
+        dx = np.min(np.diff(np.unique(subgrid_x)))
+        dy = np.min(np.diff(np.unique(subgrid_y))) 
+        
+        # Create analysis window (typically 21x21 points around flame)
+        window_size = 10  # +/- 10 points around flame
+        
+        x_min = flame_x - window_size * dx
+        x_max = flame_x + window_size * dx
+        y_min = flame_y - window_size * dy
+        y_max = flame_y + window_size * dy
+        
+        # Ensure bounds stay within available data
+        x_min = max(x_min, np.min(subgrid_x))
+        x_max = min(x_max, np.max(subgrid_x))
+        y_min = max(y_min, np.min(subgrid_y))
+        y_max = min(y_max, np.max(subgrid_y))
+        
+        # Create regular analysis grid
+        analysis_x = np.linspace(x_min, x_max, 21)
+        analysis_y = np.linspace(y_min, y_max, 21)
+        
+        region_grid = np.dstack(np.meshgrid(analysis_x, analysis_y)).reshape(-1, 2)
+        
+        # Step 4: Evaluate interpolator on analysis grid to create region_temperature
+        region_temps_flat = interpolator(region_grid)
+        region_temperature = region_temps_flat.reshape(21, 21)
+        
+        # Test interpolator at flame location
+        test_result = interpolator(np.array([[flame_x, flame_y]]))
+        
+        if not np.isnan(test_result[0]):
+            print(f"  LinearNDInterpolator created successfully with {np.sum(valid_mask)} valid points")
+            print(f"  Temperature at flame location: {test_result[0]:.1f}K")
+        else:
+            print(f"  Warning: Interpolator returns NaN at flame location")
+        
         return region_grid, region_temperature, interpolator
 
     def _calculate_contour_normal(self, contour_points: np.ndarray) -> np.ndarray:

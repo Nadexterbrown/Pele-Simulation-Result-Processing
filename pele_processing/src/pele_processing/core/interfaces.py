@@ -171,7 +171,7 @@ class FlameAnalyzer(ABC):
     """Interface for flame-specific analysis."""
 
     @abstractmethod
-    def analyze_flame_properties(self, dataset: Any, data: FieldData) -> FlameProperties:
+    def analyze_flame_properties(self, dataset: Any, data: FieldData, extraction_location: float = None, thermo_offset: float = 10e-6) -> FlameProperties:
         """Perform comprehensive flame analysis.
 
         Args:
