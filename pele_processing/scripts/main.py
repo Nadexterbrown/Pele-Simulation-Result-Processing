@@ -75,7 +75,7 @@ class ProcessingConfig:
     """Configuration for processing parameters"""
     def __init__(self):
         # Data extraction parameters
-        self.extraction_location = 0.000446  # meters - y-location for 1D ray extraction along X
+        self.extraction_location = (0.0462731 + (8.7e-5 / 2)) / 100  # meters - y-location for 1D ray extraction along X
         self.flame_temperature = DEFAULT_FLAME_TEMP
         self.shock_pressure_ratio = DEFAULT_SHOCK_PRESSURE_RATIO
         self.transport_species = 'H2'
@@ -339,7 +339,7 @@ def analyze_burned_gas_properties(dataset, field_data: FieldData, burned_gas_ana
         )
         
         # Extract results
-        results['burned_gas_velocity'] = burned_gas_props.velocity or 0.0
+        results['burned_gas_velocity'] = burned_gas_props.gas_velocity or 0.0
         
         if burned_gas_props.thermodynamic_state:
             thermo_state = burned_gas_props.thermodynamic_state
@@ -401,7 +401,7 @@ def calculate_wave_velocities(all_results: List[Dict[str, Any]]) -> None:
         for i, result in enumerate(valid_results):
             result['Flame']['Velocity [m / s]'] = flame_velocities[i]
             # Calculate relative velocity (flame velocity - gas velocity)
-            gas_velocity = result['Burned Gas'].get('Gas Velocity [m / s]', 0.0)
+            gas_velocity = result['Flame'].get('Gas Velocity [m / s]', 0.0)
             result['Flame']['Relative Velocity [m / s]'] = flame_velocities[i] - gas_velocity
     else:
         for result in valid_results:

@@ -631,6 +631,11 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
 
         properties = FlameProperties(position=flame_pos, index=flame_idx)
 
+        # Extract flame gas velocity
+        gas_vel_position = flame_pos + thermo_offset
+        gas_vel_idx = np.argmin(np.abs(data.coordinates - gas_vel_position))
+        properties.gas_velocity = data.velocity_x[gas_vel_idx]
+
         # Extract thermodynamic state at flame location with offset from 1D data
         try:
             from ..core.domain import ThermodynamicState

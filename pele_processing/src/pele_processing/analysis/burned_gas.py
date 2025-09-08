@@ -50,9 +50,9 @@ class PeleBurnedGasAnalyzer(BurnedGasAnalyzer):
             
             # Extract velocity if available
             if data.velocity_x is not None and burned_gas_idx < len(data.velocity_x):
-                properties.velocity = data.velocity_x[burned_gas_idx]
+                properties.gas_velocity = data.velocity_x[burned_gas_idx]
             else:
-                properties.velocity = 0.0
+                properties.gas_velocity = 0.0
             
             return properties
             
