@@ -12,7 +12,6 @@ import os
 import sys
 import time
 import numpy as np
-import argparse
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
@@ -1126,56 +1125,11 @@ def process_datasets_sequential(dataset_paths: List[str], config: ProcessingConf
 # Main Execution
 ########################################################################################################################
 
-def parse_arguments():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(
-        description="Pele simulation data processing with MPI support",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Sequential processing
-  python main_processing_script.py -i /path/to/pele_data -o /path/to/output
-
-  # MPI parallel processing
-  mpirun -n 4 python main_processing_script.py -i /path/to/pele_data -o /path/to/output
-
-  # Test with dry run (no processing, just validation)
-  python main_processing_script.py -i /path/to/pele_data --dry-run
-        """)
-    
-    parser.add_argument('-i', '--input-dir', type=str, required=False,
-                        default='./pele_data_2d',
-                        help='Input directory containing Pele plotfiles')
-    
-    parser.add_argument('-o', '--output-dir', type=str, required=False,
-                        help='Output directory for results (default: auto-generated)')
-    
-    parser.add_argument('--dry-run', action='store_true',
-                        help='Validate setup without processing data')
-    
-    parser.add_argument('--flame-temp', type=float, default=DEFAULT_FLAME_TEMP,
-                        help=f'Flame temperature threshold (default: {DEFAULT_FLAME_TEMP}K)')
-    
-    parser.add_argument('--shock-ratio', type=float, default=DEFAULT_SHOCK_PRESSURE_RATIO,
-                        help=f'Shock pressure ratio threshold (default: {DEFAULT_SHOCK_PRESSURE_RATIO})')
-    
-    parser.add_argument('--extraction-y', type=float, default=0.000446,
-                        help='Y-coordinate for 1D extraction along X (default: 0.000446 m)')
-    
-    parser.add_argument('--no-animations', action='store_true',
-                        help='Disable animation frame creation')
-    
-    parser.add_argument('-v', '--verbose', action='store_true',
-                        help='Enable verbose output')
-    
-    return parser.parse_args()
 
 def main():
     """Main execution function"""
-    
-    # Parse command line arguments
-    args = parse_arguments()
-    
+
+
     # Only show header on rank 0 (master) for MPI runs
     if MPI_RANK == 0:
         print(f"\n{'='*100}")
@@ -1189,17 +1143,10 @@ def main():
     
     # Configuration
     config = ProcessingConfig()
-    config.extraction_location = args.extraction_y
-    config.flame_temperature = args.flame_temp
-    config.shock_pressure_ratio = args.shock_ratio
-    config.create_animations = not args.no_animations
     
     # Setup paths
-    input_directory = Path(args.input_dir)
-    if args.output_dir:
-        output_directory = Path(args.output_dir)
-    else:
-        output_directory = Path(f"./Processed-MPI-Global-Results-V{VERSION}")
+    input_directory = Path('./pele_data_2d')
+    output_directory = Path(f"./Processed-MPI-Global-Results-V{VERSION}")
     
     if MPI_RANK == 0:
         print(f"Input directory: {input_directory}")
@@ -1210,7 +1157,6 @@ def main():
     if MPI_RANK == 0:
         if not input_directory.exists():
             print(f"\nERROR: Input directory does not exist: {input_directory}")
-            print("Please provide a valid input directory with -i/--input-dir")
             if IS_MPI_RUN:
                 comm.Abort(1)
             else:
@@ -1247,22 +1193,6 @@ def main():
                 
             print(f"Found {len(dataset_paths)} datasets to process")
             
-            # If dry run, just show summary and exit
-            if args.dry_run:
-                print(f"\nDRY RUN MODE - Configuration Summary:")
-                print(f"  Input directory: {input_directory}")
-                print(f"  Output directory: {output_directory}")
-                print(f"  Datasets found: {len(dataset_paths)}")
-                print(f"  First few datasets: {[Path(p).name for p in dataset_paths[:3]]}")
-                print(f"  Flame temperature threshold: {config.flame_temperature}K")
-                print(f"  Shock pressure ratio: {config.shock_pressure_ratio}")
-                print(f"  Extraction Y location: {config.extraction_location:.6f}m")
-                print(f"  Create animations: {config.create_animations}")
-                print(f"  MPI enabled: {IS_MPI_RUN}")
-                if IS_MPI_RUN:
-                    print(f"  MPI processes: {MPI_SIZE}")
-                print(f"\nValidation successful. Ready for processing.")
-                return
             
         except Exception as e:
             print(f"Error loading dataset paths: {e}")
