@@ -403,10 +403,10 @@ If you use this software in your research, please cite:
 ```bibtex
 @software{pele_processing,
   title = {Pele Simulation Result Processing System},
-  author = {Pele Processing Team},
+  author = {Nolan Dexter-Brown},
   year = {2024},
   url = {https://github.com/pele-combustion/pele-processing},
-  version = {1.0.0}
+  version = {3.0.0}
 }
 ```
 
