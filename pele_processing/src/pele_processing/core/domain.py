@@ -15,6 +15,7 @@ class WaveType(Enum):
     """Types of waves that can be tracked."""
     FLAME = "flame"
     SHOCK = "shock"
+    PRESSUREWAVE = "pressure wave"
 
 
 class Direction(Enum):
@@ -122,6 +123,18 @@ class ShockProperties:
 
 
 @dataclass
+class PressureWaveProperties:
+    """Properties of a flame front."""
+    position: float  # m
+    index: Optional[int] = None  # Grid index
+    thermodynamic_state: Optional[ThermodynamicState] = None
+
+    def is_valid(self) -> bool:
+        """Check if flame has minimum required data."""
+        return self.position is not None and not np.isnan(self.position)
+
+
+@dataclass
 class GasProperties:
     """Properties of gas in a region."""
     velocity: Optional[float] = None  # m/s
@@ -168,6 +181,7 @@ class FieldData:
     density: np.ndarray  # kg/m³
     velocity_x: np.ndarray  # m/s
     velocity_y: Optional[np.ndarray] = None  # m/s
+    sound_speed: Optional[np.ndarray] = None  # m/s
     heat_release_rate: Optional[np.ndarray] = None  # W/m³
     species_data: Optional[SpeciesData] = None
 
