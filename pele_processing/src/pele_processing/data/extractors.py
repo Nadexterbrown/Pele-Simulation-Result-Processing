@@ -69,6 +69,7 @@ class PeleDataExtractor(DataExtractor):
             
             # Extract or calculate other variables
             density = self._get_density(ray, sort_idx, temperature, pressure, species_data, field_names_in_data, missing_fields)
+            sound_speed = self._get_sound_speed(ray, sort_idx, temperature, pressure, species_data, field_names_in_data, missing_fields)
             heat_release_rate = self._get_heat_release_rate(ray, sort_idx, temperature, pressure, species_data, field_names_in_data, missing_fields)
 
             return FieldData(
@@ -78,6 +79,7 @@ class PeleDataExtractor(DataExtractor):
                 density=density,
                 velocity_x=velocity_x,
                 velocity_y=velocity_y,
+                sound_speed=sound_speed,
                 heat_release_rate=heat_release_rate,
                 species_data=species_data
             )
