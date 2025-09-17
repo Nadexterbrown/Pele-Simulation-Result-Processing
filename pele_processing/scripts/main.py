@@ -22,21 +22,30 @@ from pele_processing import (
     # Core functionality
     create_data_loader, create_data_extractor, create_flame_analyzer, create_shock_analyzer,
     create_burned_gas_analyzer, create_unit_converter, setup_logging, load_dataset_paths,
-    
+
     # Data structures
     FieldData, FlameProperties, ShockProperties, BurnedGasProperties, ThermodynamicState, Point2D,
     WaveType, Direction, ProcessingResult, ProcessingBatch, DatasetInfo,
-    
+
     # Visualization
     StandardPlotter, LocalViewPlotter, ComparisonPlotter,
     create_formatter,
-    
+
     # Configuration
     ProcessingMode, LogLevel,
-    
+
     # Parallel processing
     MPICoordinator, SequentialCoordinator, create_processing_strategy
 )
+
+# Import pressure wave analyzer (may need to be added to __init__.py)
+try:
+    from pele_processing.analysis.pressure_wave import PelePressureWaveAnalyzer, DetectionMethod
+    from pele_processing.core.domain import PressureWaveProperties
+    PRESSURE_WAVE_AVAILABLE = True
+except ImportError:
+    PRESSURE_WAVE_AVAILABLE = False
+    print("Warning: Pressure wave analyzer not available")
 
 # MPI detection and setup
 try:
@@ -79,22 +88,28 @@ class ProcessingConfig:
         self.shock_pressure_ratio = DEFAULT_SHOCK_PRESSURE_RATIO
         self.transport_species = 'H2'
         self.chemical_mechanism = '../chemical_mechanisms/LiDryer.yaml'
-        
+
         # Processing flags
         self.analyze_flame = True
         self.analyze_shock = True
         self.analyze_burned_gas = True
+        self.analyze_pressure_wave = True  # Enable pressure wave analysis
         self.calculate_velocities = True
-        
+
+        # Pressure wave detection settings
+        self.pressure_wave_detection_method = "max_value"  # 'max_value', 'max_gradient', or 'threshold'
+        self.pressure_wave_threshold = None  # Only needed for threshold method
+        self.pressure_wave_field = "pressure"  # Field to use for detection
+
         # Output options
         self.create_animations = True
         self.create_plots = True
         self.save_individual_results = False  # Use single combined file only
         self.save_combined_results = True
-        
+
         # Animation parameters
         self.local_window_size = 1e-3  # 1mm window for local plots
-        
+
         # Thermodynamic calculation offsets (meters)
         self.flame_thermo_offset = 10e-6    # 10 microns ahead of flame
         self.burned_gas_offset = -10e-6     # 10 microns behind flame
@@ -325,21 +340,21 @@ def analyze_shock_properties(dataset, field_data: FieldData, config: ProcessingC
     
     return results
 
-def analyze_burned_gas_properties(dataset, field_data: FieldData, burned_gas_analyzer, 
+def analyze_burned_gas_properties(dataset, field_data: FieldData, burned_gas_analyzer,
                                 flame_position: float, flame_index: int, config: ProcessingConfig) -> Dict[str, Any]:
     """Analyze burned gas properties behind the flame using the burned gas analyzer"""
     print(f"  Analyzing burned gas properties...")
     results = {}
-    
+
     try:
         # Use the burned gas analyzer to get properties
         burned_gas_props = burned_gas_analyzer.analyze_burned_gas_properties(
             field_data, flame_position, flame_index
         )
-        
+
         # Extract results
         results['burned_gas_velocity'] = burned_gas_props.gas_velocity or 0.0
-        
+
         if burned_gas_props.thermodynamic_state:
             thermo_state = burned_gas_props.thermodynamic_state
             results.update({
@@ -355,13 +370,13 @@ def analyze_burned_gas_properties(dataset, field_data: FieldData, burned_gas_ana
                 'burned_gas_density': 0.0,
                 'burned_gas_sound_speed': 0.0
             })
-        
+
         print(f"    Burned gas velocity: {results['burned_gas_velocity']:.1f} m/s")
         print(f"    Burned gas state: T={results['burned_gas_temperature']:.1f}K, "
               f"P={results['burned_gas_pressure']:.0f}Pa, "
               f"rho={results['burned_gas_density']:.3f}kg/m^3, "
               f"c={results['burned_gas_sound_speed']:.1f}m/s")
-        
+
     except Exception as e:
         print(f"    Error in burned gas analysis: {e}")
         results.update({
@@ -371,7 +386,115 @@ def analyze_burned_gas_properties(dataset, field_data: FieldData, burned_gas_ana
             'burned_gas_density': 0.0,
             'burned_gas_sound_speed': 0.0
         })
-    
+
+    return results
+
+def analyze_pressure_wave_properties(dataset, field_data: FieldData, config: ProcessingConfig,
+                                    extractor=None) -> Dict[str, Any]:
+    """Analyze maximum pressure wave properties"""
+    print(f"  Analyzing pressure wave properties...")
+    results = {}
+
+    try:
+        if not PRESSURE_WAVE_AVAILABLE:
+            print("    Warning: Pressure wave analyzer not available")
+            results.update({
+                'pressure_wave_properties': None,
+                'max_pressure_position': 0.0,
+                'max_pressure_index': 0,
+                'max_pressure_value': 0.0,
+                'pressure_wave_temperature': 0.0,
+                'pressure_wave_density': 0.0,
+                'pressure_wave_sound_speed': 0.0
+            })
+            return results
+
+        # Import the create function
+        from pele_processing.analysis.pressure_wave import create_pressure_wave_analyzer
+
+        # Get thermodynamic calculator if available
+        thermo_calc = None
+        if hasattr(extractor, 'gas') and extractor.gas is not None:
+            # Create a simple wrapper for Cantera gas object
+            class CanteraThermodynamicCalculator:
+                def __init__(self, gas):
+                    self.gas = gas
+
+                def calculate_state(self, temperature, pressure, composition):
+                    self.gas.TPY = temperature, pressure, composition
+                    return ThermodynamicState(
+                        temperature=temperature,
+                        pressure=pressure,
+                        density=self.gas.density,
+                        sound_speed=self.gas.sound_speed
+                    )
+
+            thermo_calc = CanteraThermodynamicCalculator(extractor.gas)
+
+        # Create pressure wave analyzer with configuration
+        pressure_wave_analyzer = create_pressure_wave_analyzer(
+            detection_method=config.pressure_wave_detection_method,
+            threshold_value=config.pressure_wave_threshold,
+            field_name=config.pressure_wave_field,
+            thermo_calculator=thermo_calc
+        )
+
+        # Perform pressure wave analysis
+        pressure_wave_properties = pressure_wave_analyzer.analyze_pressure_wave_properties(
+            dataset, field_data, config.extraction_location
+        )
+        results['pressure_wave_properties'] = pressure_wave_properties
+
+        # Extract individual properties
+        wave_position = getattr(pressure_wave_properties, 'position', 0.0)
+        wave_index = getattr(pressure_wave_properties, 'index', 0)
+
+        results['max_pressure_position'] = wave_position
+        results['max_pressure_index'] = wave_index
+
+        # Get the actual maximum pressure value
+        max_pressure_value = np.max(field_data.pressure)
+        results['max_pressure_value'] = max_pressure_value
+
+        print(f"    Maximum pressure position: {wave_position:.6f} m (index: {wave_index})")
+        print(f"    Maximum pressure value: {max_pressure_value:.0f} Pa")
+
+        # Extract thermodynamic state at pressure wave
+        thermo_state = getattr(pressure_wave_properties, 'thermodynamic_state', None)
+        if thermo_state:
+            results.update({
+                'pressure_wave_temperature': getattr(thermo_state, 'temperature', 0.0),
+                'pressure_wave_pressure': getattr(thermo_state, 'pressure', 0.0),
+                'pressure_wave_density': getattr(thermo_state, 'density', 0.0),
+                'pressure_wave_sound_speed': getattr(thermo_state, 'sound_speed', 0.0)
+            })
+
+            print(f"    Pressure wave state: T={results['pressure_wave_temperature']:.1f}K, "
+                  f"rho={results['pressure_wave_density']:.3f}kg/m^3, "
+                  f"c={results['pressure_wave_sound_speed']:.1f}m/s")
+        else:
+            results.update({
+                'pressure_wave_temperature': 0.0,
+                'pressure_wave_pressure': 0.0,
+                'pressure_wave_density': 0.0,
+                'pressure_wave_sound_speed': 0.0
+            })
+
+    except Exception as e:
+        print(f"    Error in pressure wave analysis: {e}")
+        import traceback
+        print(f"    Traceback: {traceback.format_exc()}")
+        results.update({
+            'pressure_wave_properties': None,
+            'max_pressure_position': 0.0,
+            'max_pressure_index': 0,
+            'max_pressure_value': 0.0,
+            'pressure_wave_temperature': 0.0,
+            'pressure_wave_pressure': 0.0,
+            'pressure_wave_density': 0.0,
+            'pressure_wave_sound_speed': 0.0
+        })
+
     return results
 
 def calculate_wave_velocities(all_results: List[Dict[str, Any]]) -> None:
@@ -859,10 +982,16 @@ def process_single_dataset(dataset_path: str, config: ProcessingConfig,
             # Create burned gas analyzer
             burned_gas_analyzer = create_burned_gas_analyzer(offset=config.burned_gas_offset)
             burned_gas_results = analyze_burned_gas_properties(
-                dataset, field_data, burned_gas_analyzer, 
+                dataset, field_data, burned_gas_analyzer,
                 results['flame_position'], results['flame_index'], config)
             results.update(burned_gas_results)
-        
+
+        # Perform pressure wave analysis
+        if config.analyze_pressure_wave:
+            pressure_wave_results = analyze_pressure_wave_properties(
+                dataset, field_data, config, extractor)
+            results.update(pressure_wave_results)
+
         # Create animations and plots
         if config.create_animations:
             create_animation_frames(dataset, field_data, results, directories, config)
