@@ -4,17 +4,19 @@ Flame analysis for the Pele processing system.
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 
-from ..core.interfaces import FlameAnalyzer, WaveTracker
-from ..core.domain import FlameProperties, FieldData, WaveType, ThermodynamicState
+from ..core.interfaces import FlameAnalyzer, WaveTracker, ThermodynamicCalculator
+from ..core.domain import FlameProperties, FieldData, WaveType
 from ..core.exceptions import FlameAnalysisError, WaveNotFoundError
 
 
 class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
     """Flame analysis implementation for Pele datasets."""
 
-    def __init__(self, flame_temperature: float = 2500.0, transport_species: str = 'H2'):
+    def __init__(self, flame_temperature: float = 2500.0, transport_species: str = 'H2',
+                 thermo_calculator: Optional[ThermodynamicCalculator] = None):
         self.flame_temperature = flame_temperature
         self.transport_species = transport_species
+        self.thermo_calculator = thermo_calculator
 
     def extract_flame_contour(self, dataset: Any, flame_pos: float = None) -> np.ndarray:
         """Extract flame contour using YT parallel processing with fallbacks."""
@@ -572,13 +574,21 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             num_rows = cg['boxlib', 'x'].shape[1]
 
             for i in range(num_rows):
-                row_data = cg['boxlib', f'rho_omega_{transport_species}'][:, i, 0].to_value()
+                try:
+                    row_data = cg['boxlib', f'rho_omega_{transport_species}'][:, i, 0].to_value()
+                except:
+                    # Add cantera fallback
+                    raise FlameAnalysisError("consumption_rate", f"Species {transport_species} not found in dataset")
                 # Convert from g/(cm^3*s) to kg/(m^3*s)
                 row_data *= 1000
                 total_consumption += np.sum(np.abs(row_data)) * dx * dy
 
             # Calculate burning velocity
-            rho_reactant = cg["boxlib", f"rho_{transport_species}"].to_value()[-1, 0, 0] * 1000  # Convert to kg/m^3
+            try:
+                rho_reactant = cg["boxlib", f"rho_{transport_species}"].to_value()[-1, 0, 0] * 1000  # Convert to kg/m^3
+            except:
+                # Add cantera fallback
+                raise FlameAnalysisError("consumption_rate", f"Species {transport_species} not found in dataset")
             domain_height = (dataset.domain_right_edge[1].to_value() - dataset.domain_left_edge[1].to_value()) / 100
 
             burning_velocity = total_consumption / (rho_reactant * domain_height)
@@ -653,14 +663,38 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                     temp = data.temperature[thermo_idx]
                     pressure = data.pressure[thermo_idx]
                     density = data.density[thermo_idx]
-                    
-                    # Calculate sound speed from ideal gas relations
-                    # c = sqrt(gamma * R * T), assuming gamma = 1.4 and R = pressure/(density*T)
-                    sound_speed = np.sqrt(1.4 * pressure / density)
-                    
+
+                    # Try to get sound speed from data, or calculate it
+                    if data.sound_speed is not None and thermo_idx < len(data.sound_speed):
+                        sound_speed = data.sound_speed[thermo_idx]
+                    elif self.thermo_calculator is not None and data.species_data is not None:
+                        # Use thermodynamic calculator to compute sound speed
+                        from ..core.domain import ThermodynamicState as ThermoStateTemp
+                        temp_state = ThermoStateTemp(
+                            temperature=temp,
+                            pressure=pressure,
+                            density=density,
+                            sound_speed=0  # Placeholder
+                        )
+                        # Build species composition at this point
+                        composition = {}
+                        if data.species_data and data.species_data.mass_fractions:
+                            for species, mass_fracs in data.species_data.mass_fractions.items():
+                                if isinstance(mass_fracs, np.ndarray) and thermo_idx < len(mass_fracs):
+                                    composition[species] = mass_fracs[thermo_idx]
+
+                        # Calculate thermodynamic state with sound speed
+                        calculated_state = self.thermo_calculator.calculate_state(temp, pressure, composition)
+                        sound_speed = calculated_state.sound_speed
+                    else:
+                        # Fallback to ideal gas approximation
+                        # c = sqrt(gamma * R * T), where R = P/(rho*T), so c = sqrt(gamma * P/rho)
+                        gamma = 1.4  # Typical value for diatomic gases
+                        sound_speed = np.sqrt(gamma * pressure / density)
+
                     properties.thermodynamic_state = ThermodynamicState(
                         temperature=temp,
-                        pressure=pressure, 
+                        pressure=pressure,
                         density=density,
                         sound_speed=sound_speed
                     )
