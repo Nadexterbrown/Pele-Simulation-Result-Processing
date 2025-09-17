@@ -12,6 +12,11 @@ from .shock import (
     PeleShockAnalyzer, create_shock_analyzer
 )
 
+# Pressure wave analysis
+from .pressure_wave import (
+    PelePressureWaveAnalyzer, create_pressure_wave_analyzer
+)
+
 # Thermodynamics
 from .thermodynamics import (
     CanteraThermodynamicCalculator, create_thermodynamic_calculator

@@ -10,7 +10,7 @@ from .core import (
     # Domain models
     WaveType, Direction, Point2D, Point3D, BoundingBox,
     ThermodynamicState, FlameProperties, ShockProperties, GasProperties, BurnedGasProperties,
-    SpeciesData, FieldData, DatasetInfo, ProcessingResult, ProcessingBatch,
+    PressureWaveProperties, SpeciesData, FieldData, DatasetInfo, ProcessingResult, ProcessingBatch,
     AnimationFrame, VisualizationRequest,
 
     # Interfaces
@@ -57,6 +57,20 @@ from .analysis import (
     CanteraThermodynamicCalculator, create_thermodynamic_calculator,
     GeometryAnalyzer, FlameGeometryAnalyzer, create_geometry_analyzer
 )
+
+# Import pressure wave analyzer separately since it's in a different module
+try:
+    from .analysis.pressure_wave import (
+        PelePressureWaveAnalyzer,
+        create_pressure_wave_analyzer,
+        DetectionMethod
+    )
+    PRESSURE_WAVE_AVAILABLE = True
+except ImportError:
+    PRESSURE_WAVE_AVAILABLE = False
+    PelePressureWaveAnalyzer = None
+    create_pressure_wave_analyzer = None
+    DetectionMethod = None
 
 # Parallel processing
 from .parallel import (
@@ -217,7 +231,7 @@ def create_analysis_pipeline(config):
 __all__ = [
     # Core
     'WaveType', 'Direction', 'ThermodynamicState', 'FlameProperties', 'ShockProperties',
-    'FieldData', 'ProcessingResult', 'ProcessingBatch', 'DatasetInfo',
+    'PressureWaveProperties', 'FieldData', 'ProcessingResult', 'ProcessingBatch', 'DatasetInfo',
     'Container', 'get_global_container',
 
     # Configuration
@@ -228,6 +242,7 @@ __all__ = [
 
     # Analysis
     'create_flame_analyzer', 'create_shock_analyzer', 'create_burned_gas_analyzer', 'create_thermodynamic_calculator',
+    'create_pressure_wave_analyzer', 'PelePressureWaveAnalyzer', 'DetectionMethod',
 
     # Parallel
     'create_processing_strategy', 'create_default_adaptive_strategy',
