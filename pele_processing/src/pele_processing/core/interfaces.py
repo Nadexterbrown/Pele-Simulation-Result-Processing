@@ -244,6 +244,23 @@ class ShockAnalyzer(ABC):
         pass
 
 
+class PressureWaveAnalyzer(ABC):
+    """Interface for pressure wave analysis."""
+
+    @abstractmethod
+    def analyze_flame_properties(self, dataset: Any, data: FieldData, extraction_location: float = None) -> FlameProperties:
+        """Perform comprehensive flame analysis.
+
+        Args:
+            dataset: Full dataset for 2D analysis
+            data: 1D ray data through flame
+
+        Returns:
+            FlameProperties with all computed metrics
+        """
+        pass
+
+
 class ThermodynamicCalculator(ABC):
     """Interface for thermodynamic calculations."""
 
