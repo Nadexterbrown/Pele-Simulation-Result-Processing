@@ -25,7 +25,7 @@ from pele_processing import (
 
     # Data structures
     FieldData, FlameProperties, ShockProperties, BurnedGasProperties, ThermodynamicState, Point2D,
-    WaveType, Direction, ProcessingResult, ProcessingBatch, DatasetInfo,
+    WaveType, Direction, ProcessingResult, ProcessingBatch, DatasetInfo, PressureWaveProperties,
 
     # Visualization
     StandardPlotter, LocalViewPlotter, ComparisonPlotter,
@@ -35,17 +35,11 @@ from pele_processing import (
     ProcessingMode, LogLevel,
 
     # Parallel processing
-    MPICoordinator, SequentialCoordinator, create_processing_strategy
-)
+    MPICoordinator, SequentialCoordinator, create_processing_strategy,
 
-# Import pressure wave analyzer (may need to be added to __init__.py)
-try:
-    from pele_processing.analysis.pressure_wave import PelePressureWaveAnalyzer, DetectionMethod
-    from pele_processing.core.domain import PressureWaveProperties
-    PRESSURE_WAVE_AVAILABLE = True
-except ImportError:
-    PRESSURE_WAVE_AVAILABLE = False
-    print("Warning: Pressure wave analyzer not available")
+    # Pressure wave analysis
+    create_pressure_wave_analyzer, PelePressureWaveAnalyzer, DetectionMethod
+)
 
 # MPI detection and setup
 try:
@@ -396,22 +390,6 @@ def analyze_pressure_wave_properties(dataset, field_data: FieldData, config: Pro
     results = {}
 
     try:
-        if not PRESSURE_WAVE_AVAILABLE:
-            print("    Warning: Pressure wave analyzer not available")
-            results.update({
-                'pressure_wave_properties': None,
-                'max_pressure_position': 0.0,
-                'max_pressure_index': 0,
-                'max_pressure_value': 0.0,
-                'pressure_wave_temperature': 0.0,
-                'pressure_wave_density': 0.0,
-                'pressure_wave_sound_speed': 0.0
-            })
-            return results
-
-        # Import the create function
-        from pele_processing.analysis.pressure_wave import create_pressure_wave_analyzer
-
         # Get thermodynamic calculator if available
         thermo_calc = None
         if hasattr(extractor, 'gas') and extractor.gas is not None:
