@@ -5,11 +5,12 @@ import cantera as ct
 from ..core.domain import CJProperties, CJType
 from ..core.interfaces import ChapmanJouguetAnalyzer
 
-class CJAnalyzer(ChapmanJouguetAnalyzer, CJType):
+class CJAnalyzer(ChapmanJouguetAnalyzer):
 
     def __init__(self, mech: Any, solver_type: str = "manual", verbose: bool = False):
         self.mech = mech
         self.solver_type = solver_type
+        self.verbose = verbose
 
     def analyze_cj_deflagration(self, T: float = 300, P: float = ct.one_atm, Y: Dict[str, float] = None) -> CJProperties:
         """Perform comprehensive CJ deflagration analysis.
@@ -108,7 +109,7 @@ class CJAnalyzer(ChapmanJouguetAnalyzer, CJType):
         self.mech = self.mech
 
         # Validate wave type
-        if self.wave not in ['detonation', 'deflagration']:
+        if self.wave not in [CJType.DEFLAGRATION, CJType.DETONATION]:
             raise ValueError(f"Wave type must be 'detonation' or 'deflagration', got '{self.wave}'")
 
         # Initialize gas objects
@@ -194,7 +195,7 @@ class CJAnalyzer(ChapmanJouguetAnalyzer, CJType):
 
         # Initial guess
         V = V1 / x; r = 1 / V
-        if self.wave == 'deflagration':
+        if self.wave == CJType.DEFLAGRATION:
             w1 = 50  # Initial velocity guess for deflagration
         else:
             w1 = 2000
@@ -219,7 +220,7 @@ class CJAnalyzer(ChapmanJouguetAnalyzer, CJType):
             # ELEMENTS OF JACOBIAN
             DFHDT = (FHX - FH) / DT; DFPDT = (FPX - FP) / DT
             # VELOCITY PERTURBATION
-            if self.wave == 'deflagration':
+            if self.wave == CJType.DEFLAGRATION:
                 # Use absolute perturbation for small velocities
                 if w1 < 100:
                     DW = 1.0  # 1 m/s absolute perturbation
@@ -245,7 +246,7 @@ class CJAnalyzer(ChapmanJouguetAnalyzer, CJType):
             if abs(DT) > DTM:
                 DT = DTM * DT / abs(DT)
             # Additional velocity change limiting for deflagration
-            if self.wave == 'deflagration':
+            if self.wave == CJType.DEFLAGRATION:
                 if w1 < 10:
                     DWM = 5.0  # Absolute limit for very small velocities
                 else:
@@ -259,7 +260,7 @@ class CJAnalyzer(ChapmanJouguetAnalyzer, CJType):
             w1 = w1 + DW
 
             # Enforce constraints for deflagration
-            if self.wave == 'deflagration':
+            if self.wave == CJType.DEFLAGRATION:
                 # Keep velocity positive and subsonic
                 if w1 <= 0.1:
                     w1 = 0.1
@@ -302,7 +303,7 @@ class CJAnalyzer(ChapmanJouguetAnalyzer, CJType):
 
         """
         # DECLARATIONS
-        if self.wave == 'deflagration':
+        if self.wave == CJType.DEFLAGRATION:
             maxv = 0.8; minv = 0.05
         else:
             maxv = 2.0; minv = 1.5
