@@ -2,36 +2,14 @@
 Additional analysis modules for advanced processing.
 """
 
-# Import existing Chapman-Jouguet functionality
-from .chapmam_jouguet import (
-    CJState,
-    CJSolver,
-    CJDetonation,
-    CJDeflagration
-)
-
-# Import interface implementations
+# Import Chapman-Jouguet functionality from the new file
 from .chapman_jouguet import (
-    DetonationAnalyzer,
-    DeflagrationAnalyzer,
-    UnifiedCJAnalyzer,
-    CJParametricAnalyzerImpl,
-    create_cj_analyzer,
-    create_parametric_analyzer
+    CJAnalyzer,
+    create_chapman_jouguet_analyzer
 )
 
 __all__ = [
-    # Original CJ classes
-    'CJState',
-    'CJSolver',
-    'CJDetonation',
-    'CJDeflagration',
-
-    # Interface implementations
-    'DetonationAnalyzer',
-    'DeflagrationAnalyzer',
-    'UnifiedCJAnalyzer',
-    'CJParametricAnalyzerImpl',
-    'create_cj_analyzer',
-    'create_parametric_analyzer'
+    # CJ Analyzer and factory
+    'CJAnalyzer',
+    'create_chapman_jouguet_analyzer'
 ]
