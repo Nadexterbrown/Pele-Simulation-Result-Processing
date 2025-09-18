@@ -17,7 +17,7 @@ from .domain import (
     Point2D, Point3D, BoundingBox,
 
     # Physical properties
-    ThermodynamicState, FlameProperties, ShockProperties, GasProperties, BurnedGasProperties,
+    ThermodynamicState, FlameProperties, PressureWaveProperties, ShockProperties, GasProperties, BurnedGasProperties,
 
     # Data structures
     SpeciesData, FieldData, DatasetInfo,
@@ -81,7 +81,7 @@ from .container import (
 __all__ = [
     # Domain
     'WaveType', 'Direction', 'Point2D', 'Point3D', 'BoundingBox',
-    'ThermodynamicState', 'FlameProperties', 'ShockProperties', 'GasProperties', 'BurnedGasProperties',
+    'ThermodynamicState', 'FlameProperties', 'PressureWaveProperties', 'ShockProperties', 'GasProperties', 'BurnedGasProperties',
     'SpeciesData', 'FieldData', 'DatasetInfo', 'ProcessingResult', 'ProcessingBatch',
     'AnimationFrame', 'VisualizationRequest',
 
