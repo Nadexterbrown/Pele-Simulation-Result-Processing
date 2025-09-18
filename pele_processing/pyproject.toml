@@ -98,13 +98,14 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["pele_processing*"]
+include = ["pele_processing*", "base_processing*", "additional_processing*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
 "pele_processing" = ["*.yaml", "*.toml", "*.json"]
 "pele_processing.config" = ["*.yaml", "*.toml"]
 "pele_processing.utils" = ["*.yaml"]
+"additional_processing" = ["*.yaml", "*.toml", "*.json"]
 
 # Testing configuration
 [tool.pytest.ini_options]
