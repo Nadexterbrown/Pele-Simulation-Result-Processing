@@ -248,15 +248,16 @@ class PressureWaveAnalyzer(ABC):
     """Interface for pressure wave analysis."""
 
     @abstractmethod
-    def analyze_flame_properties(self, dataset: Any, data: FieldData, extraction_location: float = None) -> FlameProperties:
-        """Perform comprehensive flame analysis.
+    def analyze_pressure_wave_properties(self, dataset: Any, data: FieldData, extraction_location: float = None) -> 'PressureWaveProperties':
+        """Analyze pressure wave properties.
 
         Args:
             dataset: Full dataset for 2D analysis
-            data: 1D ray data through flame
+            data: 1D ray data through wave
+            extraction_location: Y-location of extraction
 
         Returns:
-            FlameProperties with all computed metrics
+            PressureWaveProperties with all computed metrics
         """
         pass
 

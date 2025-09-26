@@ -5,7 +5,7 @@ from typing import List, Tuple, Optional, Dict, Any, Union
 from enum import Enum
 import numpy as np
 
-from ..core.interfaces import PressureWaveAnalyzer, WaveTracker, ThermodynamicCalculator
+from ..core.interfaces import PressureWaveAnalyzer, ThermodynamicCalculator
 from ..core.domain import PressureWaveProperties, FieldData, WaveType, ThermodynamicState, FlameProperties
 from ..core.exceptions import WaveNotFoundError
 
@@ -17,7 +17,7 @@ class DetectionMethod(Enum):
     MAX_VALUE = "max_value"  # Find location of maximum value
 
 
-class PelePressureWaveAnalyzer(PressureWaveAnalyzer, WaveTracker):
+class PelePressureWaveAnalyzer(PressureWaveAnalyzer):
     """Pressure wave analysis implementation for Pele datasets."""
 
     def __init__(self, detection_method: Union[str, DetectionMethod] = DetectionMethod.MAX_VALUE,
@@ -39,7 +39,8 @@ class PelePressureWaveAnalyzer(PressureWaveAnalyzer, WaveTracker):
         self.field_name = 'pressure'
         self.thermo_calculator = thermo_calculator
 
-    def analyze_pressure_wave_properties(self, data: FieldData) -> PressureWaveProperties:
+    def analyze_pressure_wave_properties(self, dataset: Any, data: FieldData,
+                                        extraction_location: float = None) -> PressureWaveProperties:
         """
         Analyze pressure wave properties.
 
