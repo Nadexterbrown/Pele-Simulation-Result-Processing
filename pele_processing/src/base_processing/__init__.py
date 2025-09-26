@@ -241,8 +241,11 @@ __all__ = [
     'create_data_loader', 'create_data_extractor', 'create_standard_processor',
 
     # Analysis
-    'create_flame_analyzer', 'create_shock_analyzer', 'create_burned_gas_analyzer', 'create_thermodynamic_calculator',
-    'create_pressure_wave_analyzer', 'PelePressureWaveAnalyzer', 'DetectionMethod',
+    'PeleFlameAnalyzer', 'create_flame_analyzer',
+    'PeleShockAnalyzer', 'create_shock_analyzer',
+    'PeleBurnedGasAnalyzer', 'create_burned_gas_analyzer',
+    'CanteraThermodynamicCalculator', 'create_thermodynamic_calculator',
+    'PelePressureWaveAnalyzer', 'create_pressure_wave_analyzer', 'DetectionMethod',
 
     # Parallel
     'create_processing_strategy', 'create_default_adaptive_strategy',
