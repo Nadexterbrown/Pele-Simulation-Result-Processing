@@ -133,7 +133,7 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                 ]
                 
                 print(f"Creating focused box region around flame at {flame_pos:.4f}m")
-                print(f"Box bounds: x=[{focused_left[0]:.1f}, {focused_right[0]:.1f}]cm, window: -{flame_window_left*1000:.1f}/+{flame_window_right*1000:.1f}mm")
+                print(f"Box bounds: x=[{focused_left[0]:.2f}, {focused_right[0]:.2f}]cm, window: -{flame_window_left*1000:.1f}/+{flame_window_right*1000:.1f}mm")
             else:
                 # Fallback to broader regional extraction (2.5% buffer from each end)
                 flame_buffer = 0.025
