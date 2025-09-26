@@ -4,19 +4,17 @@ Flame analysis for the Pele processing system.
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 
-from ..core.interfaces import FlameAnalyzer, WaveTracker, ThermodynamicCalculator
-from ..core.domain import FlameProperties, FieldData, WaveType
+from ..core.interfaces import FlameAnalyzer, WaveTracker
+from ..core.domain import FlameProperties, FieldData, WaveType, ThermodynamicState
 from ..core.exceptions import FlameAnalysisError, WaveNotFoundError
 
 
 class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
     """Flame analysis implementation for Pele datasets."""
 
-    def __init__(self, flame_temperature: float = 2500.0, transport_species: str = 'H2',
-                 thermo_calculator: Optional[ThermodynamicCalculator] = None):
+    def __init__(self, flame_temperature: float = 2500.0, transport_species: str = 'H2'):
         self.flame_temperature = flame_temperature
         self.transport_species = transport_species
-        self.thermo_calculator = thermo_calculator
 
     def extract_flame_contour(self, dataset: Any, flame_pos: float = None) -> np.ndarray:
         """Extract flame contour using YT parallel processing with fallbacks."""
@@ -117,8 +115,8 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             
             if flame_pos is not None:
                 # Create focused box region around flame (+/-5mm window)
-                flame_window_left = 2.5e-3  # 5mm in meters
-                flame_window_right = 0.5e-3  # 5mm in meters
+                flame_window_left = 10e-3  # 10mm in meters
+                flame_window_right = 0.5e-3  # 0.5mm in meters
                 flame_pos_cm = flame_pos * 100  # Convert to cm for YT
                 
                 # Create focused left/right edges (+/-5mm around flame)
