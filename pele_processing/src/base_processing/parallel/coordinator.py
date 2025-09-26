@@ -13,7 +13,7 @@ from ..core.exceptions import MPIError, ProcessSynchronizationError, WorkDistrib
 try:
     from mpi4py import MPI
     MPI_AVAILABLE = True
-except ImportError:
+except (ImportError, RuntimeError):
     MPI = None
     MPI_AVAILABLE = False
 
