@@ -102,6 +102,13 @@ class FlameProperties:
     region_temperature: Optional[np.ndarray] = None  # Temperature field on grid
     normal_line: Optional[np.ndarray] = None  # Normal line coordinates
     interpolated_temperatures: Optional[np.ndarray] = None  # Temperatures along normal line
+    # Contour fitting results
+    contour_fits: Optional[Dict[str, Any]] = None  # All fitting results
+    best_fit_type: Optional[str] = None  # Name of best fitting method
+    best_fit_r_squared: Optional[float] = None  # R^2 of best fit
+    best_fit_length: Optional[float] = None  # Arc length of best fit curve
+    contour_length: Optional[float] = None  # Arc length of actual contour
+    length_ratio: Optional[float] = None  # Ratio of contour to fitted length
 
     def is_valid(self) -> bool:
         """Check if flame has minimum required data."""
