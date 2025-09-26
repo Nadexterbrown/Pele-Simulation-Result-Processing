@@ -17,8 +17,45 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 import yt
 
-# Import pele processing modules
-from pele_processing import (
+# Try to import from installed package first, fall back to local development path if needed
+try:
+    # This will work when the package is pip installed
+    from pele_processing.base_processing import (
+        # Core functionality
+        create_data_loader, create_data_extractor, create_flame_analyzer, create_shock_analyzer,
+        create_burned_gas_analyzer, create_unit_converter, setup_logging, load_dataset_paths,
+
+        # Data structures
+        FieldData, FlameProperties, ShockProperties, BurnedGasProperties, ThermodynamicState, Point2D,
+        WaveType, Direction, ProcessingResult, ProcessingBatch, DatasetInfo, PressureWaveProperties,
+        AnimationFrame,
+
+        # Visualization
+        StandardPlotter, LocalViewPlotter, ComparisonPlotter,
+        create_formatter,
+
+        # Configuration
+        ProcessingMode, LogLevel,
+
+        # Parallel processing
+        MPICoordinator, SequentialCoordinator, create_processing_strategy,
+
+        # Pressure wave analysis
+        create_pressure_wave_analyzer, PelePressureWaveAnalyzer, DetectionMethod
+    )
+
+    # Animation imports
+    from pele_processing.base_processing.visualization.animators import (
+        FrameAnimator, BatchAnimator
+    )
+except ImportError:
+    # Fall back to development path if not installed
+    script_dir = Path(__file__).resolve().parent
+    src_dir = script_dir.parent / 'src'
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+
+    from pele_processing.base_processing import (
     # Core functionality
     create_data_loader, create_data_extractor, create_flame_analyzer, create_shock_analyzer,
     create_burned_gas_analyzer, create_unit_converter, setup_logging, load_dataset_paths,
@@ -26,6 +63,7 @@ from pele_processing import (
     # Data structures
     FieldData, FlameProperties, ShockProperties, BurnedGasProperties, ThermodynamicState, Point2D,
     WaveType, Direction, ProcessingResult, ProcessingBatch, DatasetInfo, PressureWaveProperties,
+    AnimationFrame,
 
     # Visualization
     StandardPlotter, LocalViewPlotter, ComparisonPlotter,
@@ -39,6 +77,11 @@ from pele_processing import (
 
     # Pressure wave analysis
     create_pressure_wave_analyzer, PelePressureWaveAnalyzer, DetectionMethod
+)
+
+# Animation imports
+from pele_processing.base_processing.visualization.animators import (
+    FrameAnimator, BatchAnimator
 )
 
 # MPI detection and setup
@@ -103,6 +146,9 @@ class ProcessingConfig:
 
         # Animation parameters
         self.local_window_size = 1e-3  # 1mm window for local plots
+        self.generate_mp4 = True  # Generate MP4 animations from frames
+        self.animation_fps = 30.0  # Frames per second for animations
+        self.animation_formats = ['mp4']  # Can also include 'gif', 'avi'
 
         # Thermodynamic calculation offsets (meters)
         self.flame_thermo_offset = 10e-6    # 10 microns ahead of flame
@@ -121,7 +167,7 @@ def setup_directories(output_base: Path) -> Dict[str, Path]:
     anim_dirs = {
         'temperature': 'Temperature-Plt-Files',
         'temperature_local': 'Local-Temperature-Plt-Files',
-        'pressure': 'Pressure-Plt-Files', 
+        'pressure': 'Pressure-Plt-Files',
         'pressure_local': 'Local-Pressure-Plt-Files',
         'velocity': 'GasVelocity-Plt-Files',
         'velocity_local': 'Local-GasVelocity-Plt-Files',
@@ -178,9 +224,11 @@ def analyze_flame_properties(dataset, field_data: FieldData, config: ProcessingC
     try:
         # Create flame analyzer
         flame_analyzer = create_flame_analyzer(flame_temperature=config.flame_temperature)
-        
-        # Perform comprehensive flame analysis with thermodynamic offset
-        flame_properties = flame_analyzer.analyze_flame_properties(dataset, field_data, config.extraction_location, config.flame_thermo_offset)
+
+        # Perform comprehensive flame analysis with thermodynamic offset and contour fitting
+        flame_properties = flame_analyzer.analyze_flame_properties(
+            dataset, field_data, config.extraction_location, config.flame_thermo_offset
+        )
         results['flame_properties'] = flame_properties
         
         # Extract individual properties with error handling
@@ -238,7 +286,7 @@ def analyze_flame_properties(dataset, field_data: FieldData, config: ProcessingC
                   f"surface_length={results['surface_length']:.6f}m")
         print(f"    Consumption: rate={results['consumption_rate']:.3e}kg/s, "
               f"velocity={results['burning_velocity']:.1f}m/s")
-        
+
     except Exception as e:
         print(f"    Error in flame analysis: {e}")
         # Fill with default values
@@ -520,8 +568,75 @@ def calculate_wave_velocities(all_results: List[Dict[str, Any]]) -> None:
     print(f"  Calculated velocities for {len(valid_results)} valid time points out of {len(all_results)} total")
 
 ########################################################################################################################
-# Animation and Visualization Functions  
+# Animation and Visualization Functions
 ########################################################################################################################
+
+def generate_mp4_animations(directories: Dict[str, Path], config: ProcessingConfig) -> None:
+    """Generate MP4 animations from saved PNG frames."""
+    if not config.generate_mp4:
+        return
+
+    print(f"\n{'='*80}")
+    print("GENERATING MP4 ANIMATIONS FROM FRAMES")
+    print(f"{'='*80}")
+
+    try:
+        animator = FrameAnimator()
+
+        # Map of animation directories to output names
+        animation_dirs = {
+            'Temperature': directories['anim_temperature'],
+            'Local-Temperature': directories['anim_temperature_local'],
+            'Pressure': directories['anim_pressure'],
+            'Local-Pressure': directories['anim_pressure_local'],
+            'GasVelocity': directories['anim_velocity'],
+            'Local-GasVelocity': directories['anim_velocity_local'],
+            'HeatReleaseRate': directories['anim_heat_release'],
+            'Local-HeatReleaseRate': directories['anim_heat_release_local'],
+            'Flame-Geometry': directories['anim_flame_geometry'],
+            'Flame-Thickness': directories['anim_flame_thickness'],
+            'Flame-Fitting': directories['anim_flame_fitting'],
+            'Collective': directories['anim_collective'],
+        }
+
+        # Create output directory for videos
+        video_output_dir = directories['base'] / 'Animation-Videos'
+        video_output_dir.mkdir(exist_ok=True)
+
+        # Process each animation directory
+        for name, frame_dir in animation_dirs.items():
+            if not frame_dir.exists():
+                continue
+
+            # Check if directory has PNG files
+            png_files = list(frame_dir.glob('*.png'))
+            if not png_files:
+                print(f"  No frames found in {name} - skipping")
+                continue
+
+            print(f"  Processing {name}: {len(png_files)} frames")
+
+            # Generate animations in requested formats
+            for format in config.animation_formats:
+                output_file = video_output_dir / f"{name}_animation.{format}"
+
+                try:
+                    print(f"    Creating {format.upper()} animation...")
+                    animator.create_animation(
+                        frame_directory=frame_dir,
+                        output_path=output_file,
+                        frame_rate=config.animation_fps,
+                        format=format
+                    )
+                    print(f"    [SUCCESS] Saved to: {output_file.name}")
+
+                except Exception as e:
+                    print(f"    [FAILED] Failed to create {format}: {e}")
+
+        print(f"\nAll animations saved to: {video_output_dir}")
+
+    except Exception as e:
+        print(f"Error generating animations: {e}")
 
 def create_animation_frames(dataset, field_data: FieldData, results: Dict[str, Any], 
                            directories: Dict[str, Path], config: ProcessingConfig) -> None:
@@ -594,10 +709,10 @@ def create_animation_frames(dataset, field_data: FieldData, results: Dict[str, A
         # Flame surface contour plot
         if results.get('flame_properties') and config.analyze_flame:
             create_flame_contour_animation(
-                dataset, results['flame_properties'], 
+                dataset, results['flame_properties'],
                 directories['anim_flame_geometry'], basename, timestamp
             )
-        
+
         # Flame thickness plot
         if results.get('flame_thickness', 0.0) > 0 and results.get('flame_properties'):
             create_flame_thickness_animation(
@@ -617,12 +732,10 @@ def create_animation_frames(dataset, field_data: FieldData, results: Dict[str, A
     except Exception as e:
         print(f"    Error creating animation frames: {e}")
 
-def create_field_animation(plotter, x_data, y_data, output_dir: Path, basename: str, 
+def create_field_animation(plotter, x_data, y_data, output_dir: Path, basename: str,
                           field_name: str, timestamp: float) -> None:
     """Create single field animation frame"""
     try:
-        from pele_processing.core.domain import AnimationFrame
-        
         output_path = output_dir / f"{basename}.png"
         frame = AnimationFrame(
             dataset_basename=basename,
@@ -639,12 +752,10 @@ def create_field_animation(plotter, x_data, y_data, output_dir: Path, basename: 
         print(f"      Error creating {field_name} frame: {e}")
 
 def create_local_field_animation(plotter, x_data, y_data, output_dir: Path, basename: str,
-                                field_name: str, center: float, window_size: float, 
+                                field_name: str, center: float, window_size: float,
                                 timestamp: float) -> None:
     """Create local view animation frame"""
     try:
-        from pele_processing.core.domain import AnimationFrame
-        
         output_path = output_dir / f"{basename}.png"
         frame = AnimationFrame(
             dataset_basename=basename,
@@ -828,6 +939,15 @@ def organize_results_for_output(results: Dict[str, Any], timestamp: float) -> Di
             'PostShockThermodynamicState Density [kg / m^3]': results.get('post_shock_density', 0.0),
             'PostShockThermodynamicState Sound Speed': results.get('post_shock_sound_speed', 0.0),
             'Velocity [m / s]': results.get('shock_velocity', 0.0)
+        },
+        'Pressure Wave': {
+            'Index': results.get('max_pressure_index', 0),
+            'Position [m]': results.get('max_pressure_position', 0.0),
+            'Maximum Pressure [kg / m / s^2]': results.get('max_pressure_value', 0.0),
+            'Thermodynamic Temperature [K]': results.get('pressure_wave_temperature', 0.0),
+            'Thermodynamic Pressure [kg / m / s^2]': results.get('pressure_wave_pressure', 0.0),
+            'Thermodynamic Density [kg / m^3]': results.get('pressure_wave_density', 0.0),
+            'Thermodynamic Sound Speed': results.get('pressure_wave_sound_speed', 0.0)
         }
     }
     return organized
@@ -1252,8 +1372,8 @@ def main():
     config = ProcessingConfig()
     
     # Setup paths
-    input_directory = Path('./pele_data_2d')
-    output_directory = Path(f"./Processed-MPI-Global-Results-V{VERSION}")
+    input_directory = Path('../../pele_data_2d')
+    output_directory = Path(f"../../Processed-MPI-Global-Results-V{VERSION}")
     
     if MPI_RANK == 0:
         print(f"Input directory: {input_directory}")
@@ -1336,13 +1456,17 @@ def main():
             print(f"\n{'='*80}")
             print("SAVING COMBINED RESULTS")
             print(f"{'='*80}")
-            
+
             # Sort results by time in ascending order
             all_results.sort(key=lambda x: x.get('Time', 0.0))
-            
+
             # Create output filename
             combined_file = directories['base'] / f"Processed-MPI-Global-Results-V-{VERSION}.txt"
             save_combined_results(all_results, combined_file)
+
+        # Generate MP4 animations from the saved frames
+        if config.generate_mp4 and config.create_animations:
+            generate_mp4_animations(directories, config)
         
         # Final summary
         total_time = time.time() - total_start_time

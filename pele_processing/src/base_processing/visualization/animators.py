@@ -74,10 +74,38 @@ class FrameAnimator(AnimationBuilder):
 
     def _create_video_animation(self, frame_files: List[Path], output_path: Path,
                                 frame_rate: float, format: str) -> None:
-        """Create video animation using matplotlib."""
+        """Create video animation using imageio or matplotlib."""
         if not frame_files:
             return
 
+        # Try imageio first (better for Windows)
+        try:
+            import imageio
+
+            # For MP4, we need imageio-ffmpeg plugin
+            if format == 'mp4':
+                try:
+                    import imageio_ffmpeg
+                    # Create writer for MP4
+                    with imageio.get_writer(output_path, fps=frame_rate, codec='h264') as writer:
+                        for frame_file in frame_files:
+                            image = imageio.imread(frame_file)
+                            writer.append_data(image)
+                    return
+                except ImportError:
+                    print("    Note: imageio-ffmpeg not available, trying matplotlib...")
+            else:
+                # For other formats, use imageio directly
+                with imageio.get_writer(output_path, fps=frame_rate) as writer:
+                    for frame_file in frame_files:
+                        image = imageio.imread(frame_file)
+                        writer.append_data(image)
+                return
+
+        except ImportError:
+            pass  # Fall back to matplotlib
+
+        # Fallback to matplotlib animation
         # Load first frame to get dimensions
         first_frame = mpimg.imread(frame_files[0])
         fig = plt.figure(figsize=(first_frame.shape[1] / 100, first_frame.shape[0] / 100), dpi=100)
@@ -113,7 +141,7 @@ class FrameAnimator(AnimationBuilder):
                 writer = animation.PillowWriter(fps=frame_rate)
                 anim.save(output_path, writer=writer)
             else:
-                raise
+                raise AnimationError("writer", f"No suitable writer found for {format}. Please install imageio-ffmpeg: pip install imageio-ffmpeg")
 
         plt.close(fig)
 
