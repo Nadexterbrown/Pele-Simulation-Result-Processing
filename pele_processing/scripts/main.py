@@ -116,6 +116,16 @@ DEFAULT_SHOCK_PRESSURE_RATIO = 1.01
 # Configuration and Setup
 ########################################################################################################################
 
+class FlameConfig:
+    """Configuration for flame analysis"""
+    def __init__(self):
+        self.enable_all = True  # Comprehensive analysis
+        # Individual flags (overridden by enable_all if True)
+        self.enable_thermodynamics = False
+        self.enable_surface_length = False
+        self.enable_thickness = False
+        self.enable_consumption = False
+
 class ProcessingConfig:
     """Configuration for processing parameters"""
     def __init__(self):
@@ -128,6 +138,8 @@ class ProcessingConfig:
 
         # Processing flags
         self.analyze_flame = True
+        self.flame_config = FlameConfig()
+
         self.analyze_shock = True
         self.analyze_burned_gas = True
         self.analyze_pressure_wave = True  # Enable pressure wave analysis
@@ -222,8 +234,13 @@ def analyze_flame_properties(dataset, field_data: FieldData, config: ProcessingC
     results = {}
     
     try:
-        # Create flame analyzer
-        flame_analyzer = create_flame_analyzer(flame_temperature=config.flame_temperature)
+        # Create flame analyzer with mechanism file and configuration
+        flame_analyzer = create_flame_analyzer(
+            enable_all=config.flame_config.enable_all,
+            mechanism_file=config.chemical_mechanism,
+            flame_temperature=config.flame_temperature,
+            transport_species=config.transport_species
+        )
 
         # Perform comprehensive flame analysis with thermodynamic offset and contour fitting
         flame_properties = flame_analyzer.analyze_flame_properties(
@@ -271,7 +288,11 @@ def analyze_flame_properties(dataset, field_data: FieldData, config: ProcessingC
         
         burning_velocity = getattr(flame_properties, 'burning_velocity', 0.0)
         results['burning_velocity'] = 0.0 if (burning_velocity is None or np.isnan(burning_velocity)) else burning_velocity
-        
+
+        # Extract flame skirt position (flame at 95% domain height)
+        skirt_position = getattr(flame_properties, 'skirt_pos', 0.0)
+        results['flame_skirt_position'] = 0.0 if (skirt_position is None or np.isnan(skirt_position)) else skirt_position
+
         # Extract heat release rate at flame location
         if field_data.heat_release_rate is not None and flame_index < len(field_data.heat_release_rate):
             results['flame_hrr'] = field_data.heat_release_rate[flame_index]
@@ -302,7 +323,8 @@ def analyze_flame_properties(dataset, field_data: FieldData, config: ProcessingC
             'surface_length': 0.0,
             'consumption_rate': 0.0,
             'burning_velocity': 0.0,
-            'flame_hrr': 0.0
+            'flame_hrr': 0.0,
+            'flame_skirt_position': 0.0
         })
     
     return results
@@ -542,6 +564,7 @@ def calculate_wave_velocities(all_results: List[Dict[str, Any]]) -> None:
     times = np.array([result['Time'] for result in valid_results])
     flame_positions = np.array([result['Flame'].get('Position [m]', 0.0) for result in valid_results])
     shock_positions = np.array([result['Shock'].get('Position [m]', 0.0) for result in valid_results])
+    skirt_positions = np.array([result['Flame'].get('Skirt Position [m]', 0.0) for result in valid_results])
     
     # Calculate flame velocities
     if len(flame_positions) > 1 and not np.all(flame_positions == 0):
@@ -564,7 +587,16 @@ def calculate_wave_velocities(all_results: List[Dict[str, Any]]) -> None:
     else:
         for result in valid_results:
             result['Shock']['Velocity [m / s]'] = 0.0
-    
+
+    # Calculate flame skirt velocities
+    if len(skirt_positions) > 1 and not np.all(skirt_positions == 0):
+        skirt_velocities = np.gradient(skirt_positions, times)
+        for i, result in enumerate(valid_results):
+            result['Flame']['Skirt Velocity [m / s]'] = skirt_velocities[i]
+    else:
+        for result in valid_results:
+            result['Flame']['Skirt Velocity [m / s]'] = 0.0
+
     print(f"  Calculated velocities for {len(valid_results)} valid time points out of {len(all_results)} total")
 
 ########################################################################################################################
@@ -595,7 +627,6 @@ def generate_mp4_animations(directories: Dict[str, Path], config: ProcessingConf
             'Local-HeatReleaseRate': directories['anim_heat_release_local'],
             'Flame-Geometry': directories['anim_flame_geometry'],
             'Flame-Thickness': directories['anim_flame_thickness'],
-            'Flame-Fitting': directories['anim_flame_fitting'],
             'Collective': directories['anim_collective'],
         }
 
@@ -707,14 +738,14 @@ def create_animation_frames(dataset, field_data: FieldData, results: Dict[str, A
             )
         
         # Flame surface contour plot
-        if results.get('flame_properties') and config.analyze_flame:
+        if results.get('flame_properties') and (config.flame_config.enable_all or config.flame_config.enable_surface_length):
             create_flame_contour_animation(
                 dataset, results['flame_properties'],
                 directories['anim_flame_geometry'], basename, timestamp
             )
 
         # Flame thickness plot
-        if results.get('flame_thickness', 0.0) > 0 and results.get('flame_properties'):
+        if results.get('flame_thickness', 0.0) > 0 and results.get('flame_properties') and (config.flame_config.enable_all or config.flame_config.enable_thickness):
             create_flame_thickness_animation(
                 dataset, field_data, results['flame_properties'], results['flame_thickness'],
                 directories['anim_flame_thickness'], basename, timestamp
@@ -918,7 +949,9 @@ def organize_results_for_output(results: Dict[str, Any], timestamp: float) -> Di
             'Consumption Rate [kg / s]': results.get('consumption_rate', 0.0),
             'Burning Velocity [m / s]': results.get('burning_velocity', 0.0),
             'Velocity [m / s]': results.get('flame_velocity', 0.0),
-            'Relative Velocity [m / s]': results.get('flame_relative_velocity', 0.0)
+            'Relative Velocity [m / s]': results.get('flame_relative_velocity', 0.0),
+            'Skirt Position [m]': results.get('flame_skirt_position', 0.0),
+            'Skirt Velocity [m / s]': results.get('flame_skirt_velocity', 0.0)
         },
         'Burned Gas': {
             'Gas Velocity [m / s]': results.get('burned_gas_velocity', 0.0),
