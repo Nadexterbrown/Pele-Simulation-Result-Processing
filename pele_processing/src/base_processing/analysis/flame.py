@@ -12,9 +12,276 @@ from ..core.exceptions import FlameAnalysisError, WaveNotFoundError
 class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
     """Flame analysis implementation for Pele datasets."""
 
-    def __init__(self, flame_temperature: float = 2500.0, transport_species: str = 'H2'):
-        self.flame_temperature = flame_temperature
-        self.transport_species = transport_species
+    def __init__(self, mechanism_file: str = None, **kwargs):
+        """Initialize flame analyzer with configuration parameters.
+
+        Args:
+            mechanism_file: Path to Cantera mechanism file for reaction rate calculations
+            **kwargs: Enable flags for different calculations:
+                - enable_all: If True, enables all calculations (default: False)
+                - enable_thickness: Enable flame thickness calculation (default: False, requires flame_temperature)
+                - enable_consumption_rate: Enable consumption rate/burning velocity (default: False, requires transport_species)
+                - enable_contour: Enable 2D flame contour extraction (default: False, requires flame_temperature)
+                - enable_surface_length: Enable surface length calculation (default: False, requires flame_temperature)
+                - enable_thermodynamic_state: Enable thermodynamic state extraction (default: False)
+                - enable_cantera_fallback: Enable Cantera fallback for missing data (default: False, requires mechanism_file)
+                - verbose: Enable verbose output (default: True)
+        """
+        # Check for enable_all flag - if True, enables everything
+        enable_all = kwargs.get('enable_all', False)
+
+        # Extract enable flags from kwargs
+        # If enable_all is True, enable everything; otherwise use individual flags with False defaults
+        if enable_all:
+            self.enable_thermodynamic_state = True
+            self.enable_contour = True
+            self.enable_surface_length = True
+            self.enable_thickness = True
+            self.enable_consumption_rate = True
+            self.enable_flame_skirt = True
+        else:
+            # Individual flags default to False unless explicitly set
+            self.enable_thermodynamic_state = kwargs.get('enable_thermodynamic_state', False)
+            self.enable_contour = kwargs.get('enable_contour', False)
+            self.enable_surface_length = kwargs.get('enable_surface_length', False)
+            self.enable_thickness = kwargs.get('enable_thickness', False)
+            self.enable_consumption_rate = kwargs.get('enable_consumption_rate', False)
+            self.enable_flame_skirt = kwargs.get('enable_flame_skirt', False)
+
+        # Verbose is always controlled separately
+        self.verbose = kwargs.get('verbose', True)
+
+        # Validate required parameters based on enabled features
+        if (self.enable_thickness or self.enable_contour or self.enable_surface_length):
+            flame_temperature = kwargs.get('flame_temperature', None)
+            if flame_temperature is None:
+                raise ValueError(
+                    "flame_temperature is required when enable_thickness, enable_contour, or enable_surface_length is True"
+                )
+            self.flame_temperature = flame_temperature
+
+        if self.enable_consumption_rate:
+            transport_species = kwargs.get('transport_species', None)
+            if transport_species is None:
+                raise ValueError(
+                    "transport_species is required when enable_consumption_rate is True"
+                )
+            self.transport_species = transport_species
+
+        if self.enable_flame_skirt:
+            # Validate flame_temperature is available for skirt detection
+            if not hasattr(self, 'flame_temperature'):
+                flame_temperature = kwargs.get('flame_temperature', None)
+                if flame_temperature is None:
+                    raise ValueError(
+                        "flame_temperature is required when enable_flame_skirt is True"
+                    )
+                self.flame_temperature = flame_temperature
+
+        # Initialize chemical mechanism for Cantera fallback
+        self.mechanism_file = mechanism_file
+
+        # Store any additional kwargs for future use
+        self.additional_params = {k: v for k, v in kwargs.items()
+                                 if k not in ['enable_thickness', 'enable_consumption_rate',
+                                            'enable_contour', 'enable_surface_length',
+                                            'enable_thermodynamic_state', 'enable_cantera_fallback',
+                                            'verbose']}
+
+    def analyze_flame_properties(self, dataset: Any, data: FieldData, extraction_location: float = None,
+                                 thermo_offset: float = 10e-6) -> FlameProperties:
+        """Complete flame analysis matching original flame_geometry function."""
+        # Find flame position from 1D data
+        flame_idx, flame_pos = self.find_wave_position(data, WaveType.FLAME)
+
+        properties = FlameProperties(position=flame_pos, index=flame_idx)
+
+        # Extract flame gas velocity
+        gas_vel_position = flame_pos + thermo_offset
+        gas_vel_idx = np.argmin(np.abs(data.coordinates - gas_vel_position))
+        properties.gas_velocity = data.velocity_x[gas_vel_idx]
+
+        # Extract thermodynamic state at flame location with offset from 1D data
+        if self.enable_thermodynamic_state:
+            try:
+                from ..core.domain import ThermodynamicState
+
+                # Calculate offset position (10 microns ahead of flame)
+                thermo_position = flame_pos + thermo_offset
+
+                # Find index closest to the offset position
+                if flame_idx is not None and flame_idx < len(data.coordinates):
+                    # Find the index closest to the thermodynamic offset position
+                    thermo_idx = np.argmin(np.abs(data.coordinates - thermo_position))
+
+                    # Ensure the index is valid
+                    if thermo_idx < len(data.coordinates):
+                        temp = data.temperature[thermo_idx]
+                        pressure = data.pressure[thermo_idx]
+                        density = data.density[thermo_idx]
+
+                        # Try to get sound speed from data, or calculate it
+                        if data.sound_speed is not None and thermo_idx < len(data.sound_speed):
+                            sound_speed = data.sound_speed[thermo_idx]
+                        elif self.thermo_calculator is not None and data.species_data is not None:
+                            # Use thermodynamic calculator to compute sound speed
+                            from ..core.domain import ThermodynamicState as ThermoStateTemp
+                            temp_state = ThermoStateTemp(
+                                temperature=temp,
+                                pressure=pressure,
+                                density=density,
+                                sound_speed=0  # Placeholder
+                            )
+                            # Build species composition at this point
+                            composition = {}
+                            if data.species_data and data.species_data.mass_fractions:
+                                for species, mass_fracs in data.species_data.mass_fractions.items():
+                                    if isinstance(mass_fracs, np.ndarray) and thermo_idx < len(mass_fracs):
+                                        composition[species] = mass_fracs[thermo_idx]
+
+                            # Calculate thermodynamic state with sound speed
+                            calculated_state = self.thermo_calculator.calculate_state(temp, pressure, composition)
+                            sound_speed = calculated_state.sound_speed
+                        else:
+                            # Fallback to ideal gas approximation
+                            # c = sqrt(gamma * R * T), where R = P/(rho*T), so c = sqrt(gamma * P/rho)
+                            gamma = 1.4  # Typical value for diatomic gases
+                            sound_speed = np.sqrt(gamma * pressure / density)
+
+                        properties.thermodynamic_state = ThermodynamicState(
+                            temperature=temp,
+                            pressure=pressure,
+                            density=density,
+                            sound_speed=sound_speed
+                        )
+
+                        print(
+                            f"  Flame thermodynamic state (offset +{thermo_offset * 1e6:.1f}um): T={temp:.1f}K, P={pressure:.0f}Pa, rho={density:.3f}kg/m^3")
+                        print(f"  Extraction location: {data.coordinates[thermo_idx]:.6f}m vs flame at {flame_pos:.6f}m")
+                    else:
+                        print("  Could not extract thermodynamic state: offset position out of bounds")
+                else:
+                    print("  Could not extract thermodynamic state: invalid flame index")
+
+            except Exception as e:
+                print(f"  Thermodynamic state extraction failed: {e}")
+
+        # Extract 2D flame contour using known flame position for local search
+        if (self.enable_contour or self.enable_surface_length or self.enable_thickness or self.enable_consumption_rate):
+            try:
+                contour_points = self.extract_flame_contour(dataset, flame_pos)
+                if len(contour_points) > 0:
+                    # Sort contour points
+                    sorted_points, segments, surface_length = self.sort_contour_by_nearest_neighbors(contour_points,
+                                                                                                     dataset)
+
+                    # Store contour points if enabled
+                    if self.enable_contour:
+                        properties.contour_points = sorted_points
+                    # Store surface length if enabled
+                    if self.enable_surface_length:
+                        properties.surface_length = surface_length
+
+                    # Calculate flame thickness if contour available
+                    if self.enable_thickness:
+                        try:
+                            # Use the y-coordinate from the 1D extraction location for thickness calculation
+                            if extraction_location is not None:
+                                center_location = extraction_location  # This is the y-coordinate of the 1D ray
+                            else:
+                                # Fallback: use flame x-position (not ideal, but maintains backward compatibility)
+                                center_location = flame_pos
+                                print(
+                                    "Warning: No extraction location provided for thickness calculation, using flame position as fallback")
+
+                            thickness_result, plotting_data = self.calculate_flame_thickness(dataset, sorted_points,
+                                                                                             center_location)
+                            properties.thickness = thickness_result
+
+                            # Store plotting data for later visualization
+                            if plotting_data is not None:
+                                properties.region_grid = plotting_data.get('region_grid')
+                                properties.region_temperature = plotting_data.get('region_temperature')
+                                properties.normal_line = plotting_data.get('normal_line')
+                                properties.interpolated_temperatures = plotting_data.get('interpolated_temperatures')
+                        except Exception as e:
+                            print(f"Flame thickness calculation failed: {e}")
+                            properties.thickness = np.nan
+
+                    # Calculate consumption rate
+                    if self.enable_consumption_rate:
+                        try:
+                            consumption_rate, burning_velocity = self.calculate_consumption_rate(
+                                dataset, sorted_points, self.transport_species)
+                            properties.consumption_rate = consumption_rate
+                            properties.burning_velocity = burning_velocity
+                        except Exception as e:
+                            print(f"Consumption rate calculation failed: {e}")
+                            properties.consumption_rate = np.nan
+                            properties.burning_velocity = np.nan
+
+                    if self.enable_flame_skirt:
+                        try:
+                            # Get the segment with the longest length (most points)
+                            segment_lengths = [len(seg) for seg in segments]
+                            longest_segment_idx = np.argmax(segment_lengths)
+                            flame_front_points = segments[longest_segment_idx]
+                            properties.skirt_pos = self.calculate_flame_skirt(dataset, flame_front_points)
+                        except Exception as e:
+                            print(f"Flame skirt calculation failed: {e}")
+                            properties.skirt_pos = np.nan
+                else:
+                    print("No flame contour found")
+                    properties.surface_length = np.nan
+                    properties.thickness = np.nan
+                    properties.consumption_rate = np.nan
+                    properties.burning_velocity = np.nan
+                    properties.skirt_pos = np.nan
+
+            except Exception as e:
+                print(f"2D flame analysis failed: {e}")
+                properties.surface_length = np.nan
+                properties.thickness = np.nan
+                properties.consumption_rate = np.nan
+                properties.burning_velocity = np.nan
+
+        return properties
+
+    def find_wave_position(self, data: FieldData, wave_type: WaveType) -> Tuple[int, float]:
+        """Find flame position using temperature and species criteria."""
+        if wave_type != WaveType.FLAME:
+            raise WaveNotFoundError(wave_type.value, "Only flame detection supported")
+
+        # Primary criterion: temperature threshold
+        flame_indices = np.where(data.temperature >= self.flame_temperature)[0]
+
+        if len(flame_indices) == 0:
+            raise WaveNotFoundError("flame", f"No points above {self.flame_temperature}K")
+
+        # Use downstream-most point above threshold
+        temp_flame_idx = flame_indices[-1]
+
+        # Secondary validation with Y(HO2) species if available
+        if data.species_data and 'HO2' in data.species_data.mass_fractions:
+            species_flame_idx = np.argmax(data.species_data.mass_fractions['HO2'])
+
+            # Check agreement between methods
+            if abs(temp_flame_idx - species_flame_idx) > 10:
+                print(f'Warning: Flame Location differs by more than 10 cells!\n'
+                      f'Flame Temperature Location {data.coordinates[temp_flame_idx]}\n'
+                      f'Flame Species Location {data.coordinates[species_flame_idx]}')
+
+            flame_idx = species_flame_idx  # Prefer species-based detection
+        else:
+            flame_idx = temp_flame_idx
+
+        return flame_idx, data.coordinates[flame_idx]
+
+    def calculate_wave_velocity(self, positions: np.ndarray, times: np.ndarray) -> np.ndarray:
+        """Calculate flame velocity from position time series."""
+        if len(positions) < 2:
+            return np.array([])
+        return np.gradient(positions, times)
 
     def extract_flame_contour(self, dataset: Any, flame_pos: float = None) -> np.ndarray:
         """Extract flame contour using YT parallel processing with fallbacks."""
@@ -25,8 +292,7 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             print(f"YT extraction failed: {e}")
             return np.array([])
 
-    def sort_contour_by_nearest_neighbors(self, points: np.ndarray, dataset: Any) -> Tuple[
-        np.ndarray, List[np.ndarray], float]:
+    def sort_contour_by_nearest_neighbors(self, points: np.ndarray, dataset: Any) -> Tuple[np.ndarray, List[np.ndarray], float]:
         """Sort contour points using simple nearest neighbor approach."""
         if len(points) == 0:
             return points, [], 0.0
@@ -103,6 +369,301 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         except Exception as e:
             print(f"Error: Unable to calculate flame thickness: {e}")
             return np.nan, None
+
+    def calculate_consumption_rate(self, dataset: Any, contour_points: Optional[np.ndarray],
+                                  transport_species: str) -> Tuple[float, float]:
+        """Calculate species consumption rate and burning velocity."""
+        try:
+            if contour_points is None or len(contour_points) == 0:
+                raise FlameAnalysisError("consumption_rate", "No contour points provided")
+
+            # Create bounding box around contour
+            min_x = np.min(contour_points[:, 0]) - 10e-4
+            max_x = np.max(contour_points[:, 0]) + 10e-4
+            min_y = np.min(contour_points[:, 1])
+            max_y = np.max(contour_points[:, 1])
+
+            # Convert to cm for YT
+            left_edge = [min_x * 100, min_y * 100, dataset.domain_left_edge[2].to_value()]
+            right_edge = [max_x * 100, max_y * 100, dataset.domain_right_edge[2].to_value()]
+
+            level = dataset.index.max_level
+            dims = ((np.array(right_edge) - np.array(left_edge)) / dataset.index.get_smallest_dx().to_value()).astype(int)
+            dims[2] = 1
+
+            # Create covering grid
+            cg = dataset.covering_grid(
+                level=level,
+                left_edge=left_edge,
+                dims=dims,
+                fields=[('boxlib', 'x'), ('boxlib', 'y'),
+                       ('boxlib', f'rho_{transport_species}'),
+                       ('boxlib', f'rho_omega_{transport_species}')]
+            )
+
+            # Calculate consumption rate by integrating production rates
+            dx = cg.dds[0].to_value() / 100  # Convert cm to m
+            dy = cg.dds[1].to_value() / 100
+
+            total_consumption = 0.0
+            num_rows = cg['boxlib', 'x'].shape[1]
+
+            for i in range(num_rows):
+                try:
+                    row_data = cg['boxlib', f'rho_omega_{transport_species}'][:, i, 0].to_value()
+                    # Convert from g/(cm^3*s) to kg/(m^3*s
+                    row_data *= 1000
+                except:
+                    # Calculate rho_omega using Cantera when not available in dataset
+                    if i == 0:
+                        print(f"  rho_omega_{transport_species} not in dataset, calculating with Cantera...")
+
+                    # Import Cantera if available
+                    try:
+                        import cantera as ct
+                    except ImportError:
+                        raise FlameAnalysisError("consumption_rate",
+                            f"rho_omega_{transport_species} not in dataset and Cantera not available")
+
+                    # Initialize Cantera gas object if not already done
+                    if not hasattr(self, 'gas'):
+                        # Use mechanism file from config, or default to h2o2.yaml
+                        if self.mechanism_file:
+                            mechanism = self.mechanism_file
+                        else:
+                            mechanism = 'gri30.yaml'  # Default fallback
+
+                        self.gas = ct.Solution(mechanism)
+                        print(f"    Initialized Cantera with mechanism '{mechanism}'")
+                        print(f"    Loaded {len(self.gas.species_names)} species")
+
+                    # Extract all necessary fields for this row
+                    try:
+                        # Get temperature and pressure array for this row
+                        # Note: The covering grid shape is [nx, ny, nz], and we're iterating over ny (rows)
+                        temp_arr = cg['boxlib', 'Temp'][:, i, 0].to_value()  # K
+                        pressure_arr = cg['boxlib', 'pressure'][:, i, 0].to_value() * 0.1  # dyne/cm^2 to Pa
+
+                        # Extract species mass fractions
+                        species_dict = {}
+                        for species in self.gas.species_names:
+                            field_name = f'Y({species})'
+                            try:
+                                species_arr = cg['boxlib', field_name][:, i, 0].to_value()
+                                species_dict[species] = species_arr
+                            except:
+                                # Species not found, set to 0
+                                species_dict[species] = np.zeros_like(temp_arr)
+
+                        # Initialize array for net production rates
+                        row_data = np.zeros_like(temp_arr)
+
+                        # Loop over each grid point in this row to calculate production rates
+                        for j in range(len(temp_arr)):
+                            # Set thermodynamic state
+                            T = temp_arr[j]
+                            P = pressure_arr[j]
+
+                            # Build mass fraction dictionary for this point
+                            Y_dict = {}
+                            for species in self.gas.species_names:
+                                if species in species_dict:
+                                    Y_dict[species] = species_dict[species][j]
+                                else:
+                                    Y_dict[species] = 0.0
+
+                            # Set gas state using dictionary
+                            self.gas.TPY = T, P, Y_dict
+
+                            # Get species index for transport species
+                            try:
+                                species_idx = self.gas.species_index(transport_species)
+                            except:
+                                raise FlameAnalysisError("consumption_rate",
+                                    f"Species {transport_species} not found in Cantera mechanism")
+
+                            # Calculate net production rate for this species
+                            # omega_dot [kmol/m^3/s] * MW [kg/kmol] = rho_omega [kg/m^3/s]
+                            omega_dot = self.gas.net_production_rates[species_idx]  # kmol/m^3/s
+                            molecular_weight = self.gas.molecular_weights[species_idx]  # kg/kmol
+
+                            # rho_omega = omega_dot * MW (already in kg/m^3/s)
+                            row_data[j] = omega_dot * molecular_weight #* self.gas.Y[species_idx]
+
+                    except Exception as e:
+                        print(f"    Error calculating with Cantera: {e}")
+                        raise FlameAnalysisError("consumption_rate",
+                            f"Failed to calculate rho_omega_{transport_species}: {str(e)}")
+
+                total_consumption += np.sum(np.abs(row_data)) * dx * dy
+
+            # Calculate burning velocity
+            try:
+                rho_reactant = cg["boxlib", f"rho_{transport_species}"].to_value()[-1, 0, 0] * 1000  # Convert to kg/m^3
+
+            except:
+                # Calculate rho_omega using Cantera when not available in dataset
+                print(f"  rho_{transport_species} not in dataset, calculating with Cantera...")
+
+                # Import Cantera if available
+                try:
+                    import cantera as ct
+                except ImportError:
+                    raise FlameAnalysisError("consumption_rate",
+                                             f"rho_{transport_species} not in dataset and Cantera not available")
+
+                # Initialize Cantera gas object if not already done
+                if not hasattr(self, 'gas'):
+                    # Use mechanism file from config, or default to h2o2.yaml
+                    if self.mechanism_file:
+                        mechanism = self.mechanism_file
+                    else:
+                        mechanism = 'gri30.yaml'  # Default fallback
+
+                    self.gas = ct.Solution(mechanism)
+                    print(f"    Initialized Cantera with mechanism '{mechanism}'")
+                    print(f"    Loaded {len(self.gas.species_names)} species")
+
+                try:
+                    temp_var = cg['boxlib', 'Temp'][-1, 0, 0].to_value()  # K
+                    pressure_var = cg['boxlib', 'pressure'][-1, 0, 0].to_value() * 0.1  # dyne/cm^2 to Pa
+                    species_dict = {}
+                    for species in self.gas.species_names:
+                        field_name = f'Y({species})'
+                        try:
+                            species_arr = cg['boxlib', field_name][-1, 0, 0].to_value()
+                            species_dict[species] = species_arr
+                        except:
+                            # Species not found, set to 0
+                            species_dict[species] = 0.0
+
+                    self.gas.TPY = temp_var, pressure_var, species_dict
+
+                    # Get species index for transport species
+                    try:
+                        species_idx = self.gas.species_index(transport_species)
+                    except:
+                        raise FlameAnalysisError("consumption_rate",
+                                                 f"Species {transport_species} not found in Cantera mechanism")
+
+                    # Calculate density of reactant mixture
+                    rho_reactant = self.gas.density_mass * self.gas.Y[species_idx]  # kg/m^3
+
+                except Exception as e:
+                    raise FlameAnalysisError("consumption_rate",
+                                             f"Failed to calculate rho_{transport_species}: {str(e)}")
+
+            domain_height = (dataset.domain_right_edge[1].to_value() - dataset.domain_left_edge[1].to_value()) / 100
+
+            burning_velocity = total_consumption / (rho_reactant * domain_height)
+
+            return total_consumption, burning_velocity
+
+        except Exception as e:
+            raise FlameAnalysisError("consumption_rate", str(e))
+
+    def calculate_flame_skirt(self, dataset: Any, flame_front_points: np.ndarray):
+        """Calculate flame skirt position using ortho_ray at 95% domain height.
+
+        Extracts an orthogonal ray along the x-axis at 95% of the domain height,
+        then uses find_wave_position to locate the flame front along that ray.
+
+        Args:
+            dataset: The dataset containing domain information
+            flame_front_points: Array of flame contour points (x, y) in meters (not used in new approach)
+
+        Returns:
+            float: X-position of flame front at 95% domain height, or NaN if not found
+        """
+        try:
+            # Get domain height bounds in meters
+            domain_bottom = dataset.domain_left_edge[1].to_value() / 100  # Convert cm to m
+            domain_top = dataset.domain_right_edge[1].to_value() / 100  # Convert cm to m
+            domain_height = domain_top - domain_bottom
+
+            # Calculate 95% height position
+            target_y = domain_bottom + 0.95 * domain_height
+
+            # Extract ortho_ray along x-axis at the target y position
+            # Create a ray object similar to what extract_ray_data would return
+            try:
+                # Get domain x bounds
+                x_min = dataset.domain_left_edge[0].to_value() / 100  # Convert cm to m
+                x_max = dataset.domain_right_edge[0].to_value() / 100  # Convert cm to m
+
+                # Create an ortho_ray along x at the target y height
+                # Using YT's ortho_ray functionality
+                ray = dataset.ortho_ray(0, (target_y * 100, 0))  # axis=0 for x, coords in cm
+
+                # Extract the fields we need for flame detection
+                x_coords = ray['boxlib','x'].to_value() / 100  # Convert to meters
+                temperature = ray['boxlib','Temp'].to_value()  # Temperature in K
+
+                # Sort by x-coordinate to ensure proper ordering
+                sort_indices = np.argsort(x_coords)
+                x_coords = x_coords[sort_indices]
+                temperature = temperature[sort_indices]
+
+                # Create a minimal FieldData object for find_wave_position
+                # We only need coordinates and temperature, plus optional species data
+                class MinimalFieldData:
+                    """Minimal FieldData for flame detection"""
+                    def __init__(self, coordinates, temperature):
+                        self.coordinates = coordinates
+                        self.temperature = temperature
+                        self.species_data = None
+
+                ray_data = MinimalFieldData(x_coords, temperature)
+
+                # Try to get species data if available for better flame detection
+                try:
+                    if 'Y(HO2)' in ray.field_list:
+                        ho2_data = ray['boxlib','Y(HO2)'].to_value()[sort_indices]
+                        # Create species data structure
+                        from ..core.domain import SpeciesData
+                        ray_data.species_data = SpeciesData(species_names=['HO2'])
+                        ray_data.species_data.mass_fractions = {'HO2': ho2_data}
+                except:
+                    # Species data not available, will use temperature only
+                    ray_data.species_data = None
+
+                # Use find_wave_position to locate the flame along this ray
+                flame_idx, flame_x = self.find_wave_position(ray_data, WaveType.FLAME)
+
+                # Calculate actual relative height for reporting
+                relative_height = (target_y - domain_bottom) / domain_height
+
+                print(f"  Flame skirt: x={flame_x:.6f}m at {relative_height:.1%} domain height (Bottom Bnd: {domain_bottom}m, Top Bnd {domain_top}m)")
+                print(f"    Using ortho_ray method with {len(x_coords)} points along x-axis")
+
+                return flame_x
+
+            except Exception as e:
+                print(f"  Error extracting ortho_ray at 95% height: {e}")
+                # Fallback to contour-based method if ortho_ray fails
+                print(f"  Falling back to contour-based method")
+
+                if flame_front_points is not None and len(flame_front_points) > 0:
+                    # Find points near 95% height and take the rightmost
+                    y_distances = np.abs(flame_front_points[:, 1] - target_y)
+                    y_tolerance = 0.01 * domain_height  # 1% tolerance
+
+                    near_target = y_distances <= y_tolerance
+                    if np.any(near_target):
+                        candidate_points = flame_front_points[near_target]
+                        # Take rightmost point to ensure flame front
+                        max_x_idx = np.argmax(candidate_points[:, 0])
+                        return candidate_points[max_x_idx, 0]
+                    else:
+                        # Take closest point
+                        closest_idx = np.argmin(y_distances)
+                        return flame_front_points[closest_idx, 0]
+
+                return np.nan
+
+        except Exception as e:
+            print(f"  Error calculating flame skirt: {e}")
+            return np.nan
 
     def _extract_contour(self, dataset: Any, flame_pos: float = None) -> np.ndarray:
         """Extract flame contour using YT's covering grid + extract_isocontours."""
@@ -187,8 +748,7 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         
         raise ValueError("All YT contour extraction methods failed")
 
-    def _sort_by_nearest_neighbors(self, points: np.ndarray, dataset: Any) -> Tuple[
-        np.ndarray, List[np.ndarray], float]:
+    def _sort_by_nearest_neighbors(self, points: np.ndarray, dataset: Any) -> Tuple[np.ndarray, List[np.ndarray], float]:
         """Sort contour points using efficient nearest neighbor approach with segment breaking."""
         if len(points) < 2:
             return points, [points] if len(points) > 0 else [], 0.0
@@ -281,7 +841,6 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                 total_length += np.sum(segment_distances)
         
         return ordered_points, segments, total_length
-
 
     def _remove_duplicate_points(self, points: np.ndarray, tolerance: float = 1e-8) -> np.ndarray:
         """Remove duplicate points within tolerance."""
@@ -533,236 +1092,17 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
 
         return line_points_filtered
 
-    def calculate_consumption_rate(self, dataset: Any, contour_points: Optional[np.ndarray],
-                                  transport_species: str) -> Tuple[float, float]:
-        """Calculate species consumption rate and burning velocity."""
-        try:
-            if contour_points is None or len(contour_points) == 0:
-                raise FlameAnalysisError("consumption_rate", "No contour points provided")
 
-            # Create bounding box around contour
-            min_x = np.min(contour_points[:, 0]) - 10e-4
-            max_x = np.max(contour_points[:, 0]) + 10e-4
-            min_y = np.min(contour_points[:, 1])
-            max_y = np.max(contour_points[:, 1])
+def create_flame_analyzer(mechanism_file: str = None, **kwargs) -> FlameAnalyzer:
+    """Factory for flame analyzers with configuration options.
 
-            # Convert to cm for YT
-            left_edge = [min_x * 100, min_y * 100, dataset.domain_left_edge[2].to_value()]
-            right_edge = [max_x * 100, max_y * 100, dataset.domain_right_edge[2].to_value()]
+    Args:
+        flame_temperature: Temperature threshold for flame detection (K) - required for thickness/contour
+        transport_species: Species to track for consumption rate calculations - required for consumption_rate
+        mechanism_file: Path to Cantera mechanism file
+        **kwargs: Additional configuration flags passed to PeleFlameAnalyzer
 
-            level = dataset.index.max_level
-            dims = ((np.array(right_edge) - np.array(left_edge)) / dataset.index.get_smallest_dx().to_value()).astype(int)
-            dims[2] = 1
-
-            # Create covering grid
-            cg = dataset.covering_grid(
-                level=level,
-                left_edge=left_edge,
-                dims=dims,
-                fields=[('boxlib', 'x'), ('boxlib', 'y'),
-                       ('boxlib', f'rho_{transport_species}'),
-                       ('boxlib', f'rho_omega_{transport_species}')]
-            )
-
-            # Calculate consumption rate by integrating production rates
-            dx = cg.dds[0].to_value() / 100  # Convert cm to m
-            dy = cg.dds[1].to_value() / 100
-
-            total_consumption = 0.0
-            num_rows = cg['boxlib', 'x'].shape[1]
-
-            for i in range(num_rows):
-                try:
-                    row_data = cg['boxlib', f'rho_omega_{transport_species}'][:, i, 0].to_value()
-                except:
-                    # Add cantera fallback
-                    raise FlameAnalysisError("consumption_rate", f"Species {transport_species} not found in dataset")
-                # Convert from g/(cm^3*s) to kg/(m^3*s)
-                row_data *= 1000
-                total_consumption += np.sum(np.abs(row_data)) * dx * dy
-
-            # Calculate burning velocity
-            try:
-                rho_reactant = cg["boxlib", f"rho_{transport_species}"].to_value()[-1, 0, 0] * 1000  # Convert to kg/m^3
-            except:
-                # Add cantera fallback
-                raise FlameAnalysisError("consumption_rate", f"Species {transport_species} not found in dataset")
-            domain_height = (dataset.domain_right_edge[1].to_value() - dataset.domain_left_edge[1].to_value()) / 100
-
-            burning_velocity = total_consumption / (rho_reactant * domain_height)
-
-            return total_consumption, burning_velocity
-
-        except Exception as e:
-            raise FlameAnalysisError("consumption_rate", str(e))
-
-    def find_wave_position(self, data: FieldData, wave_type: WaveType) -> Tuple[int, float]:
-        """Find flame position using temperature and species criteria."""
-        if wave_type != WaveType.FLAME:
-            raise WaveNotFoundError(wave_type.value, "Only flame detection supported")
-
-        # Primary criterion: temperature threshold
-        flame_indices = np.where(data.temperature >= self.flame_temperature)[0]
-
-        if len(flame_indices) == 0:
-            raise WaveNotFoundError("flame", f"No points above {self.flame_temperature}K")
-
-        # Use downstream-most point above threshold
-        temp_flame_idx = flame_indices[-1]
-
-        # Secondary validation with Y(HO2) species if available
-        if data.species_data and 'HO2' in data.species_data.mass_fractions:
-            species_flame_idx = np.argmax(data.species_data.mass_fractions['HO2'])
-
-            # Check agreement between methods
-            if abs(temp_flame_idx - species_flame_idx) > 10:
-                print(f'Warning: Flame Location differs by more than 10 cells!\n'
-                      f'Flame Temperature Location {data.coordinates[temp_flame_idx]}\n'
-                      f'Flame Species Location {data.coordinates[species_flame_idx]}')
-
-            flame_idx = species_flame_idx  # Prefer species-based detection
-        else:
-            flame_idx = temp_flame_idx
-
-        return flame_idx, data.coordinates[flame_idx]
-
-    def calculate_wave_velocity(self, positions: np.ndarray, times: np.ndarray) -> np.ndarray:
-        """Calculate flame velocity from position time series."""
-        if len(positions) < 2:
-            return np.array([])
-        return np.gradient(positions, times)
-
-    def analyze_flame_properties(self, dataset: Any, data: FieldData, extraction_location: float = None, thermo_offset: float = 10e-6) -> FlameProperties:
-        """Complete flame analysis matching original flame_geometry function."""
-        # Find flame position from 1D data
-        flame_idx, flame_pos = self.find_wave_position(data, WaveType.FLAME)
-
-        properties = FlameProperties(position=flame_pos, index=flame_idx)
-
-        # Extract flame gas velocity
-        gas_vel_position = flame_pos + thermo_offset
-        gas_vel_idx = np.argmin(np.abs(data.coordinates - gas_vel_position))
-        properties.gas_velocity = data.velocity_x[gas_vel_idx]
-
-        # Extract thermodynamic state at flame location with offset from 1D data
-        try:
-            from ..core.domain import ThermodynamicState
-            
-            # Calculate offset position (10 microns ahead of flame)
-            thermo_position = flame_pos + thermo_offset
-            
-            # Find index closest to the offset position
-            if flame_idx is not None and flame_idx < len(data.coordinates):
-                # Find the index closest to the thermodynamic offset position
-                thermo_idx = np.argmin(np.abs(data.coordinates - thermo_position))
-                
-                # Ensure the index is valid
-                if thermo_idx < len(data.coordinates):
-                    temp = data.temperature[thermo_idx]
-                    pressure = data.pressure[thermo_idx]
-                    density = data.density[thermo_idx]
-
-                    # Try to get sound speed from data, or calculate it
-                    if data.sound_speed is not None and thermo_idx < len(data.sound_speed):
-                        sound_speed = data.sound_speed[thermo_idx]
-                    elif self.thermo_calculator is not None and data.species_data is not None:
-                        # Use thermodynamic calculator to compute sound speed
-                        from ..core.domain import ThermodynamicState as ThermoStateTemp
-                        temp_state = ThermoStateTemp(
-                            temperature=temp,
-                            pressure=pressure,
-                            density=density,
-                            sound_speed=0  # Placeholder
-                        )
-                        # Build species composition at this point
-                        composition = {}
-                        if data.species_data and data.species_data.mass_fractions:
-                            for species, mass_fracs in data.species_data.mass_fractions.items():
-                                if isinstance(mass_fracs, np.ndarray) and thermo_idx < len(mass_fracs):
-                                    composition[species] = mass_fracs[thermo_idx]
-
-                        # Calculate thermodynamic state with sound speed
-                        calculated_state = self.thermo_calculator.calculate_state(temp, pressure, composition)
-                        sound_speed = calculated_state.sound_speed
-                    else:
-                        # Fallback to ideal gas approximation
-                        # c = sqrt(gamma * R * T), where R = P/(rho*T), so c = sqrt(gamma * P/rho)
-                        gamma = 1.4  # Typical value for diatomic gases
-                        sound_speed = np.sqrt(gamma * pressure / density)
-
-                    properties.thermodynamic_state = ThermodynamicState(
-                        temperature=temp,
-                        pressure=pressure,
-                        density=density,
-                        sound_speed=sound_speed
-                    )
-                    
-                    print(f"  Flame thermodynamic state (offset +{thermo_offset*1e6:.1f}um): T={temp:.1f}K, P={pressure:.0f}Pa, rho={density:.3f}kg/m^3")
-                    print(f"  Extraction location: {data.coordinates[thermo_idx]:.6f}m vs flame at {flame_pos:.6f}m")
-                else:
-                    print("  Could not extract thermodynamic state: offset position out of bounds")
-            else:
-                print("  Could not extract thermodynamic state: invalid flame index")
-                
-        except Exception as e:
-            print(f"  Thermodynamic state extraction failed: {e}")
-
-        # Extract 2D flame contour using known flame position for local search
-        try:
-            contour_points = self.extract_flame_contour(dataset, flame_pos)
-            if len(contour_points) > 0:
-                # Sort contour points
-                sorted_points, segments, surface_length = self.sort_contour_by_nearest_neighbors(contour_points, dataset)
-
-                properties.surface_length = surface_length
-                properties.contour_points = sorted_points
-
-                # Calculate flame thickness if contour available
-                try:
-                    # Use the y-coordinate from the 1D extraction location for thickness calculation
-                    if extraction_location is not None:
-                        center_location = extraction_location  # This is the y-coordinate of the 1D ray
-                    else:
-                        # Fallback: use flame x-position (not ideal, but maintains backward compatibility)
-                        center_location = flame_pos
-                        print("Warning: No extraction location provided for thickness calculation, using flame position as fallback")
-                    
-                    thickness_result, plotting_data = self.calculate_flame_thickness(dataset, sorted_points, center_location)
-                    properties.thickness = thickness_result
-                    
-                    # Store plotting data for later visualization
-                    if plotting_data is not None:
-                        properties.region_grid = plotting_data.get('region_grid')
-                        properties.region_temperature = plotting_data.get('region_temperature')
-                        properties.normal_line = plotting_data.get('normal_line')
-                        properties.interpolated_temperatures = plotting_data.get('interpolated_temperatures')
-                except Exception as e:
-                    print(f"Flame thickness calculation failed: {e}")
-                    properties.thickness = np.nan
-
-                # Calculate consumption rate
-                try:
-                    consumption_rate, burning_velocity = self.calculate_consumption_rate(
-                        dataset, sorted_points, self.transport_species)
-                    properties.consumption_rate = consumption_rate
-                    properties.burning_velocity = burning_velocity
-                except Exception as e:
-                    print(f"Consumption rate calculation failed: {e}")
-                    properties.consumption_rate = np.nan
-                    properties.burning_velocity = np.nan
-            else:
-                print("No flame contour found")
-                properties.surface_length = np.nan
-                properties.thickness = np.nan
-
-        except Exception as e:
-            print(f"2D flame analysis failed: {e}")
-            properties.surface_length = np.nan
-            properties.thickness = np.nan
-
-        return properties
-
-
-def create_flame_analyzer(flame_temperature: float = 2500.0, **kwargs) -> FlameAnalyzer:
-    """Factory for flame analyzers."""
-    return PeleFlameAnalyzer(flame_temperature, **kwargs)
+    Returns:
+        Configured PeleFlameAnalyzer instance
+    """
+    return PeleFlameAnalyzer(mechanism_file, **kwargs)
