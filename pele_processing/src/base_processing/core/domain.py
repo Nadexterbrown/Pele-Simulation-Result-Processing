@@ -89,6 +89,7 @@ class FlameProperties:
     index: Optional[int] = None  # Grid index
     velocity: Optional[float] = None  # m/s
     relative_velocity: Optional[float] = None  # m/s
+    gas_velocity: Optional[float] = None  # m/s - gas velocity at flame position
     thickness: Optional[float] = None  # m
     surface_length: Optional[float] = None  # m
     heat_release_rate: Optional[float] = None  # W/m³
@@ -97,6 +98,7 @@ class FlameProperties:
     reynolds_number: Optional[float] = None
     thermodynamic_state: Optional[ThermodynamicState] = None
     contour_points: Optional[np.ndarray] = None  # 2D contour coordinates
+    skirt_pos: Optional[float] = None  # m - position of flame skirt
     # Additional data for thickness plotting
     region_grid: Optional[np.ndarray] = None  # Local grid around flame
     region_temperature: Optional[np.ndarray] = None  # Temperature field on grid
@@ -109,6 +111,10 @@ class FlameProperties:
     best_fit_length: Optional[float] = None  # Arc length of best fit curve
     contour_length: Optional[float] = None  # Arc length of actual contour
     length_ratio: Optional[float] = None  # Ratio of contour to fitted length
+    # Single fit results (from analyze_flame_properties)
+    fitted_points: Optional[np.ndarray] = None  # Fitted curve points
+    fit_parameters: Optional[Dict[str, Any]] = None  # Fitting parameters
+    fit_quality: Optional[Dict[str, float]] = None  # R^2, RMSE, fit_type
 
     def is_valid(self) -> bool:
         """Check if flame has minimum required data."""
