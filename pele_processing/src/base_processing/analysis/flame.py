@@ -391,15 +391,68 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             dims = ((np.array(right_edge) - np.array(left_edge)) / dataset.index.get_smallest_dx().to_value()).astype(int)
             dims[2] = 1
 
-            # Create covering grid
-            cg = dataset.covering_grid(
-                level=level,
-                left_edge=left_edge,
-                dims=dims,
-                fields=[('boxlib', 'x'), ('boxlib', 'y'),
-                       ('boxlib', f'rho_{transport_species}'),
-                       ('boxlib', f'rho_omega_{transport_species}')]
-            )
+            # Check if required reaction rate fields exist in dataset
+            required_fields = [('boxlib', f'rho_{transport_species}'),
+                             ('boxlib', f'rho_omega_{transport_species}')]
+            use_dataset_fields = all(field in dataset.field_list for field in required_fields)
+
+            # Create covering grid with appropriate fields
+            if use_dataset_fields:
+                print(f"  Using rho_omega_{transport_species} from dataset")
+                cg = dataset.covering_grid(
+                    level=level,
+                    left_edge=left_edge,
+                    dims=dims,
+                    fields=[('boxlib', 'x'), ('boxlib', 'y'),
+                           ('boxlib', f'rho_{transport_species}'),
+                           ('boxlib', f'rho_omega_{transport_species}')]
+                )
+            else:
+                # Will use Cantera - load temperature, pressure, and all species
+                print(f"  rho_{transport_species} or rho_omega_{transport_species} not in dataset")
+                print(f"  Will calculate consumption rate using Cantera...")
+
+                # Build fields list with all available species
+                fields_to_extract = [('boxlib', 'x'), ('boxlib', 'y'),
+                                    ('boxlib', 'Temp'), ('boxlib', 'pressure')]
+
+                species_fields = [f for f in dataset.field_list if f[0] == 'boxlib' and f[1].startswith('Y(')]
+                if species_fields:
+                    print(f"  Found {len(species_fields)} species mass fraction fields in dataset")
+                    fields_to_extract.extend(species_fields)
+                else:
+                    print(f"  Warning: No Y(species) fields found in dataset")
+
+                try:
+                    cg = dataset.covering_grid(
+                        level=level,
+                        left_edge=left_edge,
+                        dims=dims,
+                        fields=fields_to_extract
+                    )
+                except Exception as e:
+                    print(f"  Error creating covering grid with species fields: {e}")
+                    print(f"  Retrying with basic fields only...")
+                    cg = dataset.covering_grid(
+                        level=level,
+                        left_edge=left_edge,
+                        dims=dims,
+                        fields=[('boxlib', 'x'), ('boxlib', 'y'),
+                               ('boxlib', 'Temp'), ('boxlib', 'pressure')]
+                    )
+
+                # Initialize Cantera for reaction rate calculations
+                try:
+                    import cantera as ct
+                except ImportError:
+                    raise FlameAnalysisError("consumption_rate",
+                        f"rho_omega_{transport_species} not in dataset and Cantera not available")
+
+                if not hasattr(self, 'gas'):
+                    mechanism = self.mechanism_file if self.mechanism_file else 'gri30.yaml'
+                    self.gas = ct.Solution(mechanism)
+                    print(f"  Initialized Cantera with mechanism '{mechanism}'")
+                    print(f"  Loaded {len(self.gas.species_names)} species")
 
             # Calculate consumption rate by integrating production rates
             dx = cg.dds[0].to_value() / 100  # Convert cm to m
@@ -408,153 +461,86 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             total_consumption = 0.0
             num_rows = cg['boxlib', 'x'].shape[1]
 
-            for i in range(num_rows):
-                try:
+            # Process each row
+            if use_dataset_fields:
+                # Direct path: extract rho_omega from dataset
+                for i in range(num_rows):
                     row_data = cg['boxlib', f'rho_omega_{transport_species}'][:, i, 0].to_value()
-                    # Convert from g/(cm^3*s) to kg/(m^3*s
-                    row_data *= 1000
-                except:
-                    # Calculate rho_omega using Cantera when not available in dataset
-                    if i == 0:
-                        print(f"  rho_omega_{transport_species} not in dataset, calculating with Cantera...")
+                    row_data *= 1000  # Convert from g/(cm^3*s) to kg/(m^3*s)
+                    total_consumption += np.sum(np.abs(row_data)) * dx * dy
+            else:
+                # Cantera path: calculate rho_omega for each point
+                for i in range(num_rows):
+                    # Get temperature and pressure for this row
+                    temp_arr = cg['boxlib', 'Temp'][:, i, 0].to_value()  # K
+                    pressure_arr = cg['boxlib', 'pressure'][:, i, 0].to_value() * 0.1  # dyne/cm^2 to Pa
 
-                    # Import Cantera if available
-                    try:
-                        import cantera as ct
-                    except ImportError:
-                        raise FlameAnalysisError("consumption_rate",
-                            f"rho_omega_{transport_species} not in dataset and Cantera not available")
-
-                    # Initialize Cantera gas object if not already done
-                    if not hasattr(self, 'gas'):
-                        # Use mechanism file from config, or default to h2o2.yaml
-                        if self.mechanism_file:
-                            mechanism = self.mechanism_file
-                        else:
-                            mechanism = 'gri30.yaml'  # Default fallback
-
-                        self.gas = ct.Solution(mechanism)
-                        print(f"    Initialized Cantera with mechanism '{mechanism}'")
-                        print(f"    Loaded {len(self.gas.species_names)} species")
-
-                    # Extract all necessary fields for this row
-                    try:
-                        # Get temperature and pressure array for this row
-                        # Note: The covering grid shape is [nx, ny, nz], and we're iterating over ny (rows)
-                        temp_arr = cg['boxlib', 'Temp'][:, i, 0].to_value()  # K
-                        pressure_arr = cg['boxlib', 'pressure'][:, i, 0].to_value() * 0.1  # dyne/cm^2 to Pa
-
-                        # Extract species mass fractions
-                        species_dict = {}
-                        for species in self.gas.species_names:
-                            field_name = f'Y({species})'
-                            try:
-                                species_arr = cg['boxlib', field_name][:, i, 0].to_value()
-                                species_dict[species] = species_arr
-                            except:
-                                # Species not found, set to 0
-                                species_dict[species] = np.zeros_like(temp_arr)
-
-                        # Initialize array for net production rates
-                        row_data = np.zeros_like(temp_arr)
-
-                        # Loop over each grid point in this row to calculate production rates
-                        for j in range(len(temp_arr)):
-                            # Set thermodynamic state
-                            T = temp_arr[j]
-                            P = pressure_arr[j]
-
-                            # Build mass fraction dictionary for this point
-                            Y_dict = {}
-                            for species in self.gas.species_names:
-                                if species in species_dict:
-                                    Y_dict[species] = species_dict[species][j]
-                                else:
-                                    Y_dict[species] = 0.0
-
-                            # Set gas state using dictionary
-                            self.gas.TPY = T, P, Y_dict
-
-                            # Get species index for transport species
-                            try:
-                                species_idx = self.gas.species_index(transport_species)
-                            except:
-                                raise FlameAnalysisError("consumption_rate",
-                                    f"Species {transport_species} not found in Cantera mechanism")
-
-                            # Calculate net production rate for this species
-                            # omega_dot [kmol/m^3/s] * MW [kg/kmol] = rho_omega [kg/m^3/s]
-                            omega_dot = self.gas.net_production_rates[species_idx]  # kmol/m^3/s
-                            molecular_weight = self.gas.molecular_weights[species_idx]  # kg/kmol
-
-                            # rho_omega = omega_dot * MW (already in kg/m^3/s)
-                            row_data[j] = omega_dot * molecular_weight #* self.gas.Y[species_idx]
-
-                    except Exception as e:
-                        print(f"    Error calculating with Cantera: {e}")
-                        raise FlameAnalysisError("consumption_rate",
-                            f"Failed to calculate rho_omega_{transport_species}: {str(e)}")
-
-                total_consumption += np.sum(np.abs(row_data)) * dx * dy
-
-            # Calculate burning velocity
-            try:
-                rho_reactant = cg["boxlib", f"rho_{transport_species}"].to_value()[-1, 0, 0] * 1000  # Convert to kg/m^3
-
-            except:
-                # Calculate rho_omega using Cantera when not available in dataset
-                print(f"  rho_{transport_species} not in dataset, calculating with Cantera...")
-
-                # Import Cantera if available
-                try:
-                    import cantera as ct
-                except ImportError:
-                    raise FlameAnalysisError("consumption_rate",
-                                             f"rho_{transport_species} not in dataset and Cantera not available")
-
-                # Initialize Cantera gas object if not already done
-                if not hasattr(self, 'gas'):
-                    # Use mechanism file from config, or default to h2o2.yaml
-                    if self.mechanism_file:
-                        mechanism = self.mechanism_file
-                    else:
-                        mechanism = 'gri30.yaml'  # Default fallback
-
-                    self.gas = ct.Solution(mechanism)
-                    print(f"    Initialized Cantera with mechanism '{mechanism}'")
-                    print(f"    Loaded {len(self.gas.species_names)} species")
-
-                try:
-                    temp_var = cg['boxlib', 'Temp'][-1, 0, 0].to_value()  # K
-                    pressure_var = cg['boxlib', 'pressure'][-1, 0, 0].to_value() * 0.1  # dyne/cm^2 to Pa
+                    # Extract species mass fractions for this row
                     species_dict = {}
                     for species in self.gas.species_names:
                         field_name = f'Y({species})'
                         try:
-                            species_arr = cg['boxlib', field_name][-1, 0, 0].to_value()
+                            species_arr = cg['boxlib', field_name][:, i, 0].to_value()
                             species_dict[species] = species_arr
                         except:
-                            # Species not found, set to 0
-                            species_dict[species] = 0.0
+                            species_dict[species] = np.zeros_like(temp_arr)
 
-                    self.gas.TPY = temp_var, pressure_var, species_dict
+                    # Calculate production rates at each point in this row
+                    row_data = np.zeros_like(temp_arr)
+                    for j in range(len(temp_arr)):
+                        # Build mass fraction dictionary for this point
+                        Y_dict = {species: species_dict[species][j] for species in self.gas.species_names}
 
-                    # Get species index for transport species
+                        # Set gas state
+                        self.gas.TPY = temp_arr[j], pressure_arr[j], Y_dict
+
+                        # Get species index and calculate production rate
+                        try:
+                            species_idx = self.gas.species_index(transport_species)
+                        except:
+                            raise FlameAnalysisError("consumption_rate",
+                                f"Species {transport_species} not found in Cantera mechanism")
+
+                        # rho_omega = omega_dot * MW (kg/m^3/s)
+                        omega_dot = self.gas.net_production_rates[species_idx]  # kmol/m^3/s
+                        molecular_weight = self.gas.molecular_weights[species_idx]  # kg/kmol
+                        row_data[j] = omega_dot * molecular_weight
+
+                    total_consumption += np.sum(np.abs(row_data)) * dx * dy
+
+            # Calculate burning velocity using middle row
+            middle_row = num_rows // 2
+            print(f"  Extracting rho_{transport_species} from middle row (row {middle_row}/{num_rows})")
+
+            if use_dataset_fields:
+                # Get rho_species from dataset at middle row
+                rho_reactant = cg["boxlib", f"rho_{transport_species}"].to_value()[-1, middle_row, 0] * 1000  # g/cm^3 to kg/m^3
+            else:
+                # Calculate rho_species using Cantera at middle row
+                print(f"  Calculating using Cantera...")
+                temp_inlet = cg['boxlib', 'Temp'][-1, middle_row, 0].to_value()
+                pressure_inlet = cg['boxlib', 'pressure'][-1, middle_row, 0].to_value() * 0.1  # dyne/cm^2 to Pa
+
+                # Extract species at inlet
+                species_dict = {}
+                for species in self.gas.species_names:
+                    field_name = f'Y({species})'
                     try:
-                        species_idx = self.gas.species_index(transport_species)
+                        species_dict[species] = cg['boxlib', field_name][-1, middle_row, 0].to_value()
                     except:
-                        raise FlameAnalysisError("consumption_rate",
-                                                 f"Species {transport_species} not found in Cantera mechanism")
+                        species_dict[species] = 0.0
 
-                    # Calculate density of reactant mixture
-                    rho_reactant = self.gas.density_mass * self.gas.Y[species_idx]  # kg/m^3
+                self.gas.TPY = temp_inlet, pressure_inlet, species_dict
 
-                except Exception as e:
+                try:
+                    species_idx = self.gas.species_index(transport_species)
+                except:
                     raise FlameAnalysisError("consumption_rate",
-                                             f"Failed to calculate rho_{transport_species}: {str(e)}")
+                        f"Species {transport_species} not found in Cantera mechanism")
+
+                rho_reactant = self.gas.density_mass * self.gas.Y[species_idx]  # kg/m^3
 
             domain_height = (dataset.domain_right_edge[1].to_value() - dataset.domain_left_edge[1].to_value()) / 100
-
             burning_velocity = total_consumption / (rho_reactant * domain_height)
 
             return total_consumption, burning_velocity
