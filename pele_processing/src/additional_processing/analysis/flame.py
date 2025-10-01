@@ -32,13 +32,13 @@ class CanteraLaminarFlame:
         Args:
             T: Temperature in Kelvin
             P: Pressure in Pascals
-            composition: Dict of species mass fractions (Y_i)
+            composition: Dict of species mole fractions (X_i)
         """
         # Create gas object
         self.gas = self.ct.Solution(self.mechanism_file)
 
-        # Set thermodynamic state
-        self.gas.TPY = T, P, composition
+        # Set thermodynamic state using mole fractions
+        self.gas.TPX = T, P, composition
 
         # Store initial conditions
         self.initial_T = T
