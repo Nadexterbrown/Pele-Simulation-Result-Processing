@@ -12,11 +12,12 @@ from ..core.exceptions import FlameAnalysisError, WaveNotFoundError
 class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
     """Flame analysis implementation for Pele datasets."""
 
-    def __init__(self, mechanism_file: str = None, **kwargs):
+    def __init__(self, mechanism_file: str = None, thermo_calculator: Optional['ThermodynamicCalculator'] = None, **kwargs):
         """Initialize flame analyzer with configuration parameters.
 
         Args:
             mechanism_file: Path to Cantera mechanism file for reaction rate calculations
+            thermo_calculator: Optional thermodynamic calculator for sound speed calculations
             **kwargs: Enable flags for different calculations:
                 - enable_all: If True, enables all calculations (default: False)
                 - enable_thickness: Enable flame thickness calculation (default: False, requires flame_temperature)
@@ -27,6 +28,9 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                 - enable_cantera_fallback: Enable Cantera fallback for missing data (default: False, requires mechanism_file)
                 - verbose: Enable verbose output (default: True)
         """
+        # Store thermodynamic calculator
+        self.thermo_calculator = thermo_calculator
+
         # Check for enable_all flag - if True, enables everything
         enable_all = kwargs.get('enable_all', False)
 
@@ -1079,16 +1083,17 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         return line_points_filtered
 
 
-def create_flame_analyzer(mechanism_file: str = None, **kwargs) -> FlameAnalyzer:
+def create_flame_analyzer(mechanism_file: str = None, thermo_calculator: Optional['ThermodynamicCalculator'] = None, **kwargs) -> FlameAnalyzer:
     """Factory for flame analyzers with configuration options.
 
     Args:
         flame_temperature: Temperature threshold for flame detection (K) - required for thickness/contour
         transport_species: Species to track for consumption rate calculations - required for consumption_rate
         mechanism_file: Path to Cantera mechanism file
+        thermo_calculator: Optional thermodynamic calculator for sound speed calculations
         **kwargs: Additional configuration flags passed to PeleFlameAnalyzer
 
     Returns:
         Configured PeleFlameAnalyzer instance
     """
-    return PeleFlameAnalyzer(mechanism_file, **kwargs)
+    return PeleFlameAnalyzer(mechanism_file, thermo_calculator, **kwargs)
