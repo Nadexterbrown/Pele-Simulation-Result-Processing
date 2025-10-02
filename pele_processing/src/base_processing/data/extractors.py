@@ -181,7 +181,7 @@ class PeleDataExtractor(DataExtractor):
 
         for species in self.gas.species_names:
             field_name = f'Y({species})'
-            if field_name in dict(ray.ds.field_list):
+            if ('boxlib', field_name) in ray.ds.field_list:
                 mass_fractions = ray["boxlib", field_name][sort_idx].to_value()
                 species_data.mass_fractions[species] = mass_fractions
 
@@ -267,7 +267,7 @@ class PeleDataExtractor(DataExtractor):
             if hrr_calc is not None:
                 print(f"  Cantera calculated heat release rate: {len(hrr_calc)} points, range [{np.min(hrr_calc):.2e}, {np.max(hrr_calc):.2e}] W/m³")
             return hrr_calc
-        
+
         print(f"  Warning: {field_name} not available and cannot calculate with Cantera")
         return None
 
