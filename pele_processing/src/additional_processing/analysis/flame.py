@@ -2,6 +2,9 @@ from typing import Dict, Optional, Tuple, Any, List
 import numpy as np
 from scipy.optimize import curve_fit
 from pathlib import Path
+import logging
+import tempfile
+import os
 from base_processing.analysis.flame import PeleFlameAnalyzer as BaseFlameAnalyzer
 from additional_processing.core.domain import CanteraFreeFlameProperties
 from .flame_baseline import FlameBaselineFitter, FlameBaselineResult
@@ -9,12 +12,13 @@ from .flame_baseline import FlameBaselineFitter, FlameBaselineResult
 class CanteraLaminarFlame:
     """Calculate free flame properties using Cantera."""
 
-    def __init__(self, mechanism_file: str = 'h2o2.yaml'):
+    def __init__(self, mechanism_file: str = 'h2o2.yaml', restart_file: Optional[str] = None):
         """
         Initialize Cantera free flame calculator.
 
         Args:
             mechanism_file: Path to Cantera mechanism file (e.g., 'h2o2.yaml', 'gri30.yaml')
+            restart_file: Path to XML file for saving/loading flame solutions (default: temp file)
         """
         try:
             import cantera as ct
@@ -22,6 +26,18 @@ class CanteraLaminarFlame:
             self.mechanism_file = mechanism_file
             self.gas = None
             self.flame = None
+
+            # Setup restart file path - use YAML format for Cantera 3.0+
+            if restart_file is None:
+                # Use a temporary file in the current working directory
+                self.restart_file = os.path.join(os.getcwd(), 'cantera_flame_restart.yaml')
+            else:
+                self.restart_file = restart_file
+
+            self.has_saved_solution = False
+            self.last_successful_T = None
+            self.last_successful_P = None
+
         except ImportError:
             raise ImportError("Cantera is required for CanteraLaminarFlame but is not installed.")
 
@@ -45,38 +61,158 @@ class CanteraLaminarFlame:
         self.initial_P = P
         self.initial_composition = composition
 
-    def run(self, domain_width: float = 1e-5, refine_criteria: Optional[Dict] = None) -> 'ct.FreeFlame':
+    def save_solution(self) -> None:
+        """Save the current flame solution to YAML file for restart."""
+        if self.flame is not None:
+            try:
+                # For YAML format, use overwrite=True to replace existing solution
+                self.flame.save(self.restart_file, name='solution',
+                               description=f'T={self.initial_T:.1f}K, P={self.initial_P/1e5:.1f}bar',
+                               overwrite=True)
+                self.has_saved_solution = True
+                self.last_successful_T = self.initial_T
+                self.last_successful_P = self.initial_P
+                logging.debug(f"Saved flame solution to {self.restart_file}")
+            except Exception as e:
+                logging.warning(f"Failed to save flame solution: {e}")
+
+    def load_solution(self) -> bool:
         """
-        Calculate 1D freely propagating flame.
+        Load a previously saved flame solution.
+
+        Args:
+            use_as_initial_guess: If True, use loaded solution as initial guess for new calculation
+
+        Returns:
+            True if solution was loaded successfully, False otherwise
+        """
+        if not self.has_saved_solution or not os.path.exists(self.restart_file):
+            return False
+
+        try:
+            # Restore the flame from saved solution
+            self.flame.restore(self.restart_file, name='solution', loglevel=1)
+
+            self.flame.inlet.T = self.initial_T
+            self.flame.inlet.X = self.initial_composition
+            self.flame.P = self.initial_P
+
+            # Set max grid points for better resolution if needed
+            self.flame.set_max_grid_points(self.flame.flame, 2000)
+
+            logging.debug(f"Loaded flame solution from {self.restart_file} and updated BCs: "
+            f"T={self.initial_T:.1f}K, P={self.initial_P / 1e5:.1f}bar")
+
+            logging.debug(f"Loaded flame solution from {self.restart_file}")
+            return True
+        except Exception as e:
+            logging.warning(f"Failed to load flame solution: {e}")
+            return False
+
+    def run(self, domain_width: float = 1e-5, refine_criteria: Optional[Dict] = None,
+            use_restart: bool = True, max_retries: int = 2) -> 'ct.FreeFlame':
+        """
+        Calculate 1D freely propagating flame with restart capability.
 
         Args:
             domain_width: Width of computational domain in meters
-            n_points: Initial number of grid points
             refine_criteria: Optional refinement criteria dict
+            use_restart: If True, use saved solution from previous timestep if available
+            max_retries: Maximum number of retry attempts with restart
 
         Returns:
             Cantera FreeFlame object with solution
         """
         if self.gas is None:
-            raise ValueError("Must call set_initial_conditions() first")
+            raise ValueError("Must call setup() first")
 
-        # Create flame object
-        self.flame = self.ct.FreeFlame(self.gas, width=domain_width)
+        for attempt in range(max_retries):
+            try:
+                # Create flame object
+                if attempt == 0 or self.flame is None:
+                    self.flame = self.ct.FreeFlame(self.gas, width=domain_width)
 
-        # Set initial guess
-        self.flame.set_initial_guess()
+                # Only use restart on retry attempts (after first failure)
+                restart_used = False
+                if use_restart and attempt > 0 and self.has_saved_solution:
+                    # Always use saved solution on retry - don't check compatibility
+                    if self.load_solution():
+                        restart_used = True
+                        logging.info(f"Using restart from T={self.last_successful_T:.1f}K, "
+                                       f"P={self.last_successful_P/1e5:.1f}bar for current "
+                                       f"T={self.initial_T:.1f}K, P={self.initial_P/1e5:.1f}bar")
 
-        # Set refinement criteria
-        if refine_criteria:
-            self.flame.set_refine_criteria(**refine_criteria)
-        else:
-            # Default refinement criteria
-            self.flame.set_refine_criteria(ratio=3, slope=0.02, curve=0.02)
+                if not restart_used:
+                    # Set initial guess normally
+                    self.flame.set_initial_guess()
 
-        # Solve with auto-refinement
-        self.flame.solve(loglevel=0, refine_grid=True, auto=True)
+                # Set refinement criteria
+                if refine_criteria:
+                    self.flame.set_refine_criteria(**refine_criteria)
+                else:
+                    # Adjust criteria based on pressure
+                    P_bar = self.initial_P / 1e5
+                    if P_bar > 100:  # High pressure conditions
+                        self.flame.set_refine_criteria(ratio=4, slope=0.01, curve=0.01, prune=0.0)
+                    else:
+                        self.flame.set_refine_criteria(ratio=3, slope=0.02, curve=0.02)
 
-        return self.flame
+                # Solve with auto-refinement
+                if not restart_used:
+                    self.flame.solve(loglevel=0, refine_grid=True, auto=True)
+                else:
+                    self.flame.solve(loglevel=0, refine_grid=True, auto=False) 
+
+                # Save successful solution
+                self.save_solution()
+
+                return self.flame
+
+            except Exception as e:
+                error_msg = str(e)
+                if "monotonically increasing" in error_msg:
+                    logging.warning(f"Grid error on attempt {attempt+1}/{max_retries}: {error_msg}")
+                    if attempt < max_retries - 1:
+                        # Will retry with restart on next iteration
+                        continue
+                    else:
+                        # Last attempt failed
+                        if self.has_saved_solution:
+                            logging.error(f"Failed after {max_retries} attempts. Last successful: "
+                                        f"T={self.last_successful_T:.1f}K, P={self.last_successful_P/1e5:.1f}bar")
+                        raise
+                else:
+                    # Other error types, raise immediately
+                    raise
+
+    def _check_restart_compatibility(self) -> bool:
+        """
+        Check if saved solution is compatible with current conditions.
+
+        Returns:
+            True if restart file can be used for current conditions
+        """
+        if not self.has_saved_solution:
+            return False
+
+        # Check if conditions are reasonably close (within 20% for T, 50% for P)
+        if self.last_successful_T is not None and self.last_successful_P is not None:
+            T_ratio = abs(self.initial_T - self.last_successful_T) / self.last_successful_T
+            P_ratio = abs(self.initial_P - self.last_successful_P) / self.last_successful_P
+
+            # More lenient for restart attempts
+            return T_ratio < 0.2 and P_ratio < 0.5
+
+        return False
+
+    def cleanup(self) -> None:
+        """Remove the restart file if it exists."""
+        if os.path.exists(self.restart_file):
+            try:
+                os.remove(self.restart_file)
+                logging.debug(f"Removed restart file: {self.restart_file}")
+            except Exception as e:
+                logging.warning(f"Failed to remove restart file: {e}")
 
     def get_flame_properties(self) -> CanteraFreeFlameProperties:
         """
