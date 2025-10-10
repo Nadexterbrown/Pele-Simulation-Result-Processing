@@ -22,6 +22,11 @@ from .specialized import (
     SchlierenVisualizer, StreamlineVisualizer, ContourVisualizer
 )
 
+# YT Field Plotter
+from .yt_field_plotter import (
+    YTFieldPlotter, PlotType, create_yt_field_plotter
+)
+
 __all__ = [
     # Plotters
     'StandardPlotter',
@@ -43,7 +48,12 @@ __all__ = [
     # Specialized
     'SchlierenVisualizer',
     'StreamlineVisualizer',
-    'ContourVisualizer'
+    'ContourVisualizer',
+
+    # YT Field Plotter
+    'YTFieldPlotter',
+    'PlotType',
+    'create_yt_field_plotter'
 ]
 
 __version__ = "1.0.0"
