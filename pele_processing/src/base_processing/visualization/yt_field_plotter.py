@@ -874,6 +874,188 @@ class YTFieldPlotter:
             except Exception as e:
                 print(f"Failed to plot {field}: {e}")
 
+    def plot_multiple_localized_contours(self, dataset: Any, fields: List[Dict[str, Any]],
+                                        center_point: List[float],
+                                        forward_bound: float, backward_bound: float,
+                                        output_path: Union[Path, str], axis: Union[str, int] = 'z',
+                                        normal_axis: str = 'x',
+                                        contour_lines: Optional[Dict[str, np.ndarray]] = None,
+                                        auto_organize: bool = True) -> None:
+        """
+        OPTIMIZED: Extract localized region ONCE and plot multiple fields from it.
+
+        This method extracts the localized region data only once, then plots multiple
+        fields from the same extracted data. Much more efficient than calling
+        plot_localized_contour() multiple times.
+
+        Args:
+            dataset: YT dataset to plot
+            fields: List of field configurations, each containing:
+                   {'field': str, 'colormap': str, 'log_scale': bool, 'levels': int, 'zlim': tuple}
+            center_point: Center point coordinates [x, y, z] in dataset units
+            forward_bound: Distance forward from center along normal_axis
+            backward_bound: Distance backward from center along normal_axis
+            output_path: Base directory for organized output
+            axis: Axis normal to plotting plane ('x', 'y', 'z' or 0, 1, 2)
+            normal_axis: Reference axis for forward/backward bounds ('x', 'y', or 'z')
+            contour_lines: Optional dictionary of contour lines to overlay on all plots
+            auto_organize: If True, organize as output_path/FieldName/plt00100.png
+        """
+        if not self.yt_available:
+            raise PlotGenerationError("multiple_localized_contours", "YT not available")
+
+        try:
+            # Convert axes to indices
+            axis_map = {'x': 0, 'y': 1, 'z': 2, 0: 0, 1: 1, 2: 2}
+            axis_idx = axis_map.get(axis, axis)
+            normal_axis_idx = axis_map.get(normal_axis, normal_axis)
+            axis_names = ['x', 'y', 'z']
+
+            # Get domain bounds
+            domain_left = dataset.domain_left_edge.to_ndarray()
+            domain_right = dataset.domain_right_edge.to_ndarray()
+
+            # Calculate box bounds
+            left_edge = list(center_point)
+            right_edge = list(center_point)
+
+            # Set bounds along normal axis
+            left_edge[normal_axis_idx] = center_point[normal_axis_idx] - backward_bound
+            right_edge[normal_axis_idx] = center_point[normal_axis_idx] + forward_bound
+
+            # For plotting plane dimensions, use full domain extent
+            for i in range(3):
+                if i != normal_axis_idx:
+                    left_edge[i] = domain_left[i]
+                    right_edge[i] = domain_right[i]
+
+            # Ensure bounds don't exceed domain
+            for i in range(3):
+                left_edge[i] = max(left_edge[i], domain_left[i])
+                right_edge[i] = min(right_edge[i], domain_right[i])
+
+            print(f"Extracting localized region ONCE for {len(fields)} fields:")
+            print(f"  Center: {center_point}")
+            print(f"  Box bounds: {left_edge} to {right_edge}")
+            print(f"  Normal axis: {axis_names[normal_axis_idx]} (backward: {backward_bound}, forward: {forward_bound})")
+
+            # Get max refinement level
+            max_level = dataset.index.max_level
+
+            # Calculate dimensions for covering grid
+            dx = dataset.index.get_smallest_dx().to_value()
+            dims = [int((right_edge[i] - left_edge[i]) / dx) for i in range(3)]
+            dims[axis_idx] = 1  # Single cell in the slice direction
+
+            # Convert field names to PeleC format
+            pele_fields = [get_pele_field_name(f['field']) for f in fields]
+
+            # Create covering grid to extract ALL fields at once
+            all_fields_list = [('boxlib', 'x'), ('boxlib', 'y'), ('boxlib', 'z')] + pele_fields
+
+            print(f"  Creating covering grid for all {len(pele_fields)} fields...")
+            cg = dataset.covering_grid(
+                level=max_level,
+                left_edge=left_edge,
+                dims=dims,
+                fields=all_fields_list
+            )
+
+            # Extract coordinates ONCE
+            x_data = cg['boxlib', 'x'].to_ndarray().flatten()
+            y_data = cg['boxlib', 'y'].to_ndarray().flatten()
+            z_data = cg['boxlib', 'z'].to_ndarray().flatten()
+
+            # Select coordinates for the plotting plane
+            if axis_idx == 0:  # x-normal, plot y-z
+                plot_x, plot_y = y_data, z_data
+                xlabel, ylabel = 'Y', 'Z'
+            elif axis_idx == 1:  # y-normal, plot x-z
+                plot_x, plot_y = x_data, z_data
+                xlabel, ylabel = 'X', 'Z'
+            else:  # z-normal, plot x-y
+                plot_x, plot_y = x_data, y_data
+                xlabel, ylabel = 'X', 'Y'
+
+            # Now plot each field from the extracted data
+            print(f"  Creating {len(fields)} plots from extracted data...")
+            for i, (field_config, pele_field) in enumerate(zip(fields, pele_fields)):
+                try:
+                    field_name = field_config['field']
+                    colormap = field_config.get('colormap', 'viridis')
+                    log_scale = field_config.get('log_scale', False)
+                    levels = field_config.get('levels', 50)
+                    zlim = field_config.get('zlim', None)
+
+                    # Extract field data from covering grid
+                    field_data = cg[pele_field].to_ndarray().flatten()
+
+                    # Organize output path
+                    if auto_organize:
+                        plot_output_path = self._get_output_path(output_path, pele_field, dataset, suffix="localized_contour")
+                    else:
+                        plot_output_path = Path(output_path) / f"{pele_field}_localized_contour.png"
+
+                    # Create plot
+                    fig, ax = plt.subplots(figsize=self.figure_size, dpi=self.dpi)
+
+                    # Apply log scale if requested
+                    if log_scale:
+                        field_data_plot = np.log10(np.abs(field_data) + 1e-20)
+                        field_label = f'log10({get_pretty_field_name(pele_field)})'
+                    else:
+                        field_data_plot = field_data
+                        field_label = get_pretty_field_name(pele_field)
+
+                    # Create contour plot
+                    contour = ax.tricontourf(plot_x, plot_y, field_data_plot,
+                                            levels=levels, cmap=colormap)
+
+                    # Add colorbar at the top
+                    plt.colorbar(contour, ax=ax, label=field_label, orientation='horizontal',
+                               pad=0.05, location='top')
+
+                    # Apply color limits if specified
+                    if zlim is not None:
+                        contour.set_clim(*zlim)
+
+                    # Overlay contour lines if provided
+                    if contour_lines:
+                        for line_name, line_points in contour_lines.items():
+                            if line_points is not None and len(line_points) > 0:
+                                if axis_idx == 0:  # y-z plane
+                                    line_x, line_y = line_points[:, 1], line_points[:, 2] if line_points.shape[1] > 2 else (line_points[:, 0], line_points[:, 1])
+                                elif axis_idx == 1:  # x-z plane
+                                    line_x, line_y = line_points[:, 0], line_points[:, 2] if line_points.shape[1] > 2 else (line_points[:, 0], line_points[:, 1])
+                                else:  # x-y plane
+                                    line_x, line_y = line_points[:, 0], line_points[:, 1]
+
+                                ax.plot(line_x, line_y, label=line_name, linewidth=2, color='red', linestyle='--')
+
+                    # Set labels and title
+                    ax.set_xlabel(f'{xlabel} (dataset units)')
+                    ax.set_ylabel(f'{ylabel} (dataset units)')
+                    ax.set_aspect('equal', adjustable='box')
+
+                    pretty_name = get_pretty_field_name(pele_field)
+                    ax.set_title(f'Localized {pretty_name} - Center: {center_point[normal_axis_idx]:.6f}')
+
+                    if contour_lines:
+                        ax.legend()
+
+                    # Save plot
+                    plt.tight_layout()
+                    plt.savefig(plot_output_path, dpi=self.dpi, bbox_inches='tight')
+                    plt.close(fig)
+
+                    print(f"    ✓ {field_name}")
+
+                except Exception as e:
+                    print(f"    ✗ {field_config['field']}: {e}")
+
+        except Exception as e:
+            raise PlotGenerationError("multiple_localized_contours", str(e))
+
 
 def create_yt_field_plotter(figure_size: Tuple[int, int] = (12, 8), dpi: int = 150) -> YTFieldPlotter:
     """

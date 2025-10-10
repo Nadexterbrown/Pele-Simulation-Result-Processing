@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Batch YT Field Plotting with Flame Tracking
+Batch YT Field Plotting with Flame Tracking (MPI-Enabled)
 
 This script processes multiple datasets from a folder, tracks the flame position
 in each one, and creates localized field plots around the tracked flame location.
 
 Usage:
-    Edit the configuration section below, then run:
-    python batch_yt_field_tracking.py
+    Sequential: python main_surface_plotting.py
+    MPI Parallel: mpiexec -n 4 python main_surface_plotting.py
 
 The script will:
 1. Find all plt* files in the data directory
-2. For each dataset, detect the flame position
-3. Create localized contour plots for specified fields around the flame
+2. For each dataset, detect the flame position (MPI: distributed across ranks)
+3. Create localized contour plots for specified fields around the flame (OPTIMIZED: extract once)
 4. Organize outputs as: output_dir/Field-Plots/FieldName/plt00100_localized_contour.png
+5. Generate MP4 animations from frames (rank 0 only)
 """
 import sys
 from pathlib import Path
@@ -21,6 +22,21 @@ from typing import List, Dict
 
 # Add the src directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+# MPI detection and setup
+try:
+    from mpi4py import MPI
+    MPI_AVAILABLE = True
+    comm = MPI.COMM_WORLD
+    MPI_RANK = comm.Get_rank()
+    MPI_SIZE = comm.Get_size()
+    IS_MPI_RUN = MPI_SIZE > 1
+except ImportError:
+    MPI_AVAILABLE = False
+    IS_MPI_RUN = False
+    MPI_RANK = 0
+    MPI_SIZE = 1
+    comm = None
 
 from base_processing.data.loaders import YTDataLoader
 from base_processing.visualization import YTFieldPlotter
@@ -167,28 +183,43 @@ def process_single_dataset(
     # Output directory for field plots
     field_plots_dir = output_base / "Field-Plots"
 
-    # Create localized plots for each field
-    print(f"    Creating {len(fields_to_plot)} field plots...")
-    for field_config in fields_to_plot:
-        field_name = field_config['field']
-
-        try:
-            plotter.plot_localized_contour(
-                dataset=dataset,
-                field=field_name,
-                center_point=center_point,
-                forward_bound=forward_bound_cm,
-                backward_bound=backward_bound_cm,
-                output_path=field_plots_dir,
-                axis='z',  # Plot x-y plane
-                normal_axis='x',  # Bounds along x-axis
-                levels=50,
-                colormap=field_config['colormap'],
-                log_scale=field_config['log_scale']
-            )
-            print(f"      ✓ {field_name}")
-        except Exception as e:
-            print(f"      ✗ {field_name}: {e}")
+    # OPTIMIZED: Extract localized region ONCE for all fields
+    print(f"    Creating {len(fields_to_plot)} field plots (optimized - single extraction)...")
+    try:
+        plotter.plot_multiple_localized_contours(
+            dataset=dataset,
+            fields=fields_to_plot,  # Pass all fields at once
+            center_point=center_point,
+            forward_bound=forward_bound_cm,
+            backward_bound=backward_bound_cm,
+            output_path=field_plots_dir,
+            axis='z',  # Plot x-y plane
+            normal_axis='x',  # Bounds along x-axis
+            auto_organize=True
+        )
+    except Exception as e:
+        print(f"      Error in optimized plotting: {e}")
+        # Fallback to individual plotting if needed
+        print(f"      Falling back to individual field plotting...")
+        for field_config in fields_to_plot:
+            field_name = field_config['field']
+            try:
+                plotter.plot_localized_contour(
+                    dataset=dataset,
+                    field=field_name,
+                    center_point=center_point,
+                    forward_bound=forward_bound_cm,
+                    backward_bound=backward_bound_cm,
+                    output_path=field_plots_dir,
+                    axis='z',
+                    normal_axis='x',
+                    levels=50,
+                    colormap=field_config['colormap'],
+                    log_scale=field_config['log_scale']
+                )
+                print(f"      ✓ {field_name}")
+            except Exception as e:
+                print(f"      ✗ {field_name}: {e}")
 
 
 def generate_mp4_animations(output_dir: Path, fields_to_plot: List[Dict]) -> None:
@@ -253,54 +284,91 @@ def generate_mp4_animations(output_dir: Path, fields_to_plot: List[Dict]) -> Non
 
 
 def main():
-    """Main function for batch processing."""
+    """Main function for batch processing with MPI support."""
     # Use configuration from top of file
     data_dir = DATA_DIR
     output_dir = OUTPUT_DIR
 
-    # Find all plt files
-    plt_files = sorted(data_dir.glob("plt*"))
+    # Only rank 0 prints header and finds files initially
+    if MPI_RANK == 0:
+        print("="*80)
+        print("Batch YT Field Plotting with Flame Tracking")
+        if IS_MPI_RUN:
+            print(f"MPI Mode: {MPI_SIZE} processes")
+        else:
+            print("Sequential Mode")
+        print("="*80)
+        print(f"\nConfiguration:")
+        print(f"  Data directory: {data_dir.absolute()}")
+        print(f"  Output directory: {output_dir.absolute()}")
+        print(f"  Extraction location: {EXTRACTION_LOCATION:.6f} m")
+        print(f"  Flame temperature threshold: {FLAME_TEMPERATURE:.1f} K")
+        print(f"  Forward bound: {FORWARD_BOUND:.6f} m")
+        print(f"  Backward bound: {BACKWARD_BOUND:.6f} m")
+        print(f"  X-offset: {X_OFFSET:.6f} m")
+        print(f"\nFields to plot:")
+        for field_config in FIELDS_TO_PLOT:
+            print(f"  - {field_config['field']}")
 
-    if not plt_files:
-        print(f"Error: No plt files found in {data_dir}")
-        sys.exit(1)
+        # Find all plt files
+        plt_files = sorted(data_dir.glob("plt*"))
 
-    print("="*80)
-    print("Batch YT Field Plotting with Flame Tracking")
-    print("="*80)
-    print(f"\nConfiguration:")
-    print(f"  Data directory: {data_dir.absolute()}")
-    print(f"  Output directory: {output_dir.absolute()}")
-    print(f"  Number of datasets: {len(plt_files)}")
-    print(f"  Extraction location: {EXTRACTION_LOCATION:.6f} m")
-    print(f"  Flame temperature threshold: {FLAME_TEMPERATURE:.1f} K")
-    print(f"  Forward bound: {FORWARD_BOUND:.6f} m")
-    print(f"  Backward bound: {BACKWARD_BOUND:.6f} m")
-    print(f"  X-offset: {X_OFFSET:.6f} m")
-    print(f"\nFields to plot:")
-    for field_config in FIELDS_TO_PLOT:
-        print(f"  - {field_config['field']}")
+        if not plt_files:
+            print(f"Error: No plt files found in {data_dir}")
+            if IS_MPI_RUN:
+                comm.Abort(1)
+            else:
+                sys.exit(1)
 
-    # Create output directory
-    output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  Number of datasets: {len(plt_files)}")
+
+        # Create output directory
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        plt_files = None
+
+    # Broadcast dataset paths to all ranks
+    if IS_MPI_RUN:
+        plt_files = comm.bcast(plt_files, root=0)
+        comm.barrier()  # Synchronize before starting
+
+    # ========================================================================
+    # PARALLEL PHASE: Each MPI rank processes a subset of datasets
+    # ========================================================================
+
+    if MPI_RANK == 0:
+        print(f"\n{'='*80}")
+        if IS_MPI_RUN:
+            print(f"PARALLEL PROCESSING: Distributing {len(plt_files)} datasets across {MPI_SIZE} ranks")
+        else:
+            print("SEQUENTIAL PROCESSING")
+        print("="*80)
 
     # Create YT data loader
     loader = YTDataLoader()
 
-    # Process each dataset
-    print(f"\n{'='*80}")
-    print("Processing datasets...")
-    print("="*80)
+    # Distribute datasets across ranks (round-robin)
+    my_datasets = []
+    for i, plt_file in enumerate(plt_files):
+        if i % MPI_SIZE == MPI_RANK:
+            my_datasets.append(plt_file)
 
+    if IS_MPI_RUN:
+        print(f"Rank {MPI_RANK}: Processing {len(my_datasets)} datasets")
+
+    # Process assigned datasets
     success_count = 0
     fail_count = 0
 
-    for plt_file in plt_files:
+    for plt_file in my_datasets:
         try:
+            if IS_MPI_RUN:
+                print(f"\nRank {MPI_RANK}: Processing {plt_file.name}")
+
             # Load dataset
             dataset = loader.load_dataset(plt_file)
 
-            # Process dataset
+            # Process dataset (creates PNG frames with optimized extraction)
             process_single_dataset(
                 dataset=dataset,
                 plt_file=plt_file,
@@ -316,25 +384,48 @@ def main():
             success_count += 1
 
         except Exception as e:
-            print(f"\n  Error processing {plt_file.name}: {e}")
+            if IS_MPI_RUN:
+                print(f"\nRank {MPI_RANK}: Error processing {plt_file.name}: {e}")
+            else:
+                print(f"\n  Error processing {plt_file.name}: {e}")
             fail_count += 1
 
-    # Summary
-    print(f"\n{'='*80}")
-    print("Batch Processing Complete")
-    print("="*80)
-    print(f"  Successfully processed: {success_count}/{len(plt_files)} datasets")
-    print(f"  Failed: {fail_count}/{len(plt_files)} datasets")
-    print(f"\nOutput saved to: {output_dir.absolute()}")
-    print(f"Field plots organized in: {(output_dir / 'Field-Plots').absolute()}")
-    print("="*80)
+    # Synchronize all ranks before gathering results
+    if IS_MPI_RUN:
+        comm.barrier()
 
-    # Generate MP4 animations
-    generate_mp4_animations(output_dir, FIELDS_TO_PLOT)
+        # Gather statistics from all ranks
+        all_success = comm.gather(success_count, root=0)
+        all_fail = comm.gather(fail_count, root=0)
 
-    print(f"\n{'='*80}")
-    print("All processing complete!")
-    print("="*80)
+        if MPI_RANK == 0:
+            total_success = sum(all_success)
+            total_fail = sum(all_fail)
+    else:
+        total_success = success_count
+        total_fail = fail_count
+
+    # ========================================================================
+    # SEQUENTIAL PHASE: Rank 0 generates MP4 animations from PNG frames
+    # ========================================================================
+
+    if MPI_RANK == 0:
+        # Summary
+        print(f"\n{'='*80}")
+        print("Figure Generation Complete")
+        print("="*80)
+        print(f"  Successfully processed: {total_success}/{len(plt_files)} datasets")
+        print(f"  Failed: {total_fail}/{len(plt_files)} datasets")
+        print(f"\nOutput saved to: {output_dir.absolute()}")
+        print(f"Field plots organized in: {(output_dir / 'Field-Plots').absolute()}")
+        print("="*80)
+
+        # Generate MP4 animations from frames (sequential, rank 0 only)
+        generate_mp4_animations(output_dir, FIELDS_TO_PLOT)
+
+        print(f"\n{'='*80}")
+        print("All processing complete!")
+        print("="*80)
 
 
 if __name__ == "__main__":
