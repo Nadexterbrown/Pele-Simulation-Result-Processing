@@ -256,30 +256,32 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         if wave_type != WaveType.FLAME:
             raise WaveNotFoundError(wave_type.value, "Only flame detection supported")
 
+        # Secondary criterion: Maximum Heat Release Rate
+        flame_indices = np.argmax(data.heat_release_rate)
+
         # Primary criterion: temperature threshold
-        flame_indices = np.where(data.temperature >= self.flame_temperature)[0]
+        temperature_flame_idx = np.where(data.temperature >= self.flame_temperature)[0][-1]
 
         if len(flame_indices) == 0:
             raise WaveNotFoundError("flame", f"No points above {self.flame_temperature}K")
 
-        # Use downstream-most point above threshold
-        temp_flame_idx = flame_indices[-1]
+        # Check agreement between methods
+        if abs(flame_indices - temperature_flame_idx) > 10:
+            print(f'Warning: Flame Location differs by more than 10 cells!\n'
+                  f'Flame Maximum Heat Release Location {data.coordinates[flame_indices]}\n'
+                  f'Flame Temperature ({self.flame_temperature}) Location {data.coordinates[temperature_flame_idx]}')
 
-        # Secondary validation with Y(HO2) species if available
+        # Tertiary validation with Y(HO2) species if available
         if data.species_data and 'HO2' in data.species_data.mass_fractions:
             species_flame_idx = np.argmax(data.species_data.mass_fractions['HO2'])
 
             # Check agreement between methods
-            if abs(temp_flame_idx - species_flame_idx) > 10:
+            if abs(flame_indices - species_flame_idx) > 10:
                 print(f'Warning: Flame Location differs by more than 10 cells!\n'
-                      f'Flame Temperature Location {data.coordinates[temp_flame_idx]}\n'
+                      f'Flame Temperature Location {data.coordinates[flame_indices]}\n'
                       f'Flame Species Location {data.coordinates[species_flame_idx]}')
 
-            flame_idx = species_flame_idx  # Prefer species-based detection
-        else:
-            flame_idx = temp_flame_idx
-
-        return flame_idx, data.coordinates[flame_idx]
+        return flame_indices, data.coordinates[flame_indices]
 
     def calculate_wave_velocity(self, positions: np.ndarray, times: np.ndarray) -> np.ndarray:
         """Calculate flame velocity from position time series."""
