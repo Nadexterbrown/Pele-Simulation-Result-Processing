@@ -434,7 +434,7 @@ class PeleDataExtractor(DataExtractor):
                 if property_name == 'density':
                     result[i] = self.gas.density
                 elif property_name == 'heat_release_rate':
-                    result[i] = np.sum(self.gas.net_production_rates * self.gas.standard_enthalpies_RT * ct.gas_constant * self.gas.T)
+                    result[i] = self.gas.heat_release_rate
                 elif property_name == 'viscosity':
                     result[i] = self.gas.viscosity
                 elif property_name == 'conductivity':
