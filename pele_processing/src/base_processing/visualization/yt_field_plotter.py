@@ -22,33 +22,22 @@ FIELD_NAME_MAP = {
     'Pressure': 'pressure',
 
     # Velocity fields
-    'Velocity-X': 'x_velocity',
-    'Velocity-Y': 'y_velocity',
-    'Velocity-Z': 'z_velocity',
-    'Velocity-Magnitude': 'velocity_magnitude',
+    'X Velocity': 'x_velocity',
+    'Y Velocity': 'y_velocity',
+    'Z Velocity': 'z_velocity',
+    'Velocity Magnitude': 'velocity_magnitude',
 
     # Energy fields
-    'Total-Energy': 'rho_E',
-    'Internal-Energy': 'rho_e',
-    'Kinetic-Energy': 'kinetic_energy',
+    'Total Energy': 'rho_E',
+    'Internal Energy': 'rho_e',
 
     # Reaction fields
-    'Heat-Release-Rate': 'HeatRelease',
+    'Heat Release Rate': 'heatRelease',
 
     # Derived fields
-    'Mach-Number': 'Mach',
-    'Sound-Speed': 'soundspeed',
+    'Mach Number': 'MachNumber',
+    'Sound Speed': 'soundspeed',
 
-    # Species shortcuts (optional convenience - can also use Y(H2) directly)
-    'Y_H2': 'Y(H2)',
-    'Y_O2': 'Y(O2)',
-    'Y_H2O': 'Y(H2O)',
-    'Y_OH': 'Y(OH)',
-    'Y_HO2': 'Y(HO2)',
-    'Y_H': 'Y(H)',
-    'Y_O': 'Y(O)',
-    'Y_H2O2': 'Y(H2O2)',
-    'Y_N2': 'Y(N2)',
 }
 
 # Reverse mapping: PeleC name -> pretty name
@@ -84,8 +73,8 @@ def get_pretty_field_name(field: str) -> str:
     if field.startswith('rho_') and not field.startswith('rho_omega_'):
         return field
 
-    # Default: capitalize and replace underscores with hyphens for readability
-    return field.replace('_', '-').title()
+    # Default: return the original string as-is if not in mapping
+    return field
 
 
 class PlotType(Enum):
@@ -880,7 +869,10 @@ class YTFieldPlotter:
                                         output_path: Union[Path, str], axis: Union[str, int] = 'z',
                                         normal_axis: str = 'x',
                                         contour_lines: Optional[Dict[str, np.ndarray]] = None,
-                                        auto_organize: bool = True) -> None:
+                                        auto_organize: bool = True,
+                                        enable_y_zoom: bool = False,
+                                        y_min: float = 0.0,
+                                        y_max: float = 0.001) -> None:
         """
         OPTIMIZED: Extract localized region ONCE and plot multiple fields from it.
 
@@ -900,6 +892,9 @@ class YTFieldPlotter:
             normal_axis: Reference axis for forward/backward bounds ('x', 'y', or 'z')
             contour_lines: Optional dictionary of contour lines to overlay on all plots
             auto_organize: If True, organize as output_path/FieldName/plt00100.png
+            enable_y_zoom: Enable y-direction zooming (limits y-axis extent)
+            y_min: Minimum y-coordinate for zoom (dataset units)
+            y_max: Maximum y-coordinate for zoom (dataset units)
         """
         if not self.yt_available:
             raise PlotGenerationError("multiple_localized_contours", "YT not available")
@@ -923,11 +918,18 @@ class YTFieldPlotter:
             left_edge[normal_axis_idx] = center_point[normal_axis_idx] - backward_bound
             right_edge[normal_axis_idx] = center_point[normal_axis_idx] + forward_bound
 
-            # For plotting plane dimensions, use full domain extent
+            # For plotting plane dimensions, use full domain extent OR y-zoom if enabled
             for i in range(3):
                 if i != normal_axis_idx:
-                    left_edge[i] = domain_left[i]
-                    right_edge[i] = domain_right[i]
+                    # Check if this is the y-axis (index 1) and y-zoom is enabled
+                    if i == 1 and enable_y_zoom:
+                        # Use specified y-bounds instead of full domain
+                        left_edge[i] = y_min
+                        right_edge[i] = y_max
+                    else:
+                        # Use full domain extent
+                        left_edge[i] = domain_left[i]
+                        right_edge[i] = domain_right[i]
 
             # Ensure bounds don't exceed domain
             for i in range(3):
@@ -1048,10 +1050,10 @@ class YTFieldPlotter:
                     plt.savefig(plot_output_path, dpi=self.dpi, bbox_inches='tight')
                     plt.close(fig)
 
-                    print(f"    ✓ {field_name}")
+                    print(f"    [OK] {field_name}")
 
                 except Exception as e:
-                    print(f"    ✗ {field_config['field']}: {e}")
+                    print(f"    [FAILED] {field_config['field']}: {e}")
 
         except Exception as e:
             raise PlotGenerationError("multiple_localized_contours", str(e))
