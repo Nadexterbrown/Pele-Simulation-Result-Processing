@@ -262,7 +262,7 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         # Primary criterion: temperature threshold
         temperature_flame_idx = np.where(data.temperature >= self.flame_temperature)[0][-1]
 
-        if len(flame_indices) == 0:
+        if len(temperature_flame_idx) == 0:
             raise WaveNotFoundError("flame", f"No points above {self.flame_temperature}K")
 
         # Check agreement between methods
