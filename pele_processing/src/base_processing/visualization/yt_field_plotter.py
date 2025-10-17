@@ -1121,7 +1121,8 @@ class YTFieldPlotter:
                                       zlim: Optional[Tuple[float, float]] = None,
                                       title: Optional[str] = None,
                                       contour_lines: Optional[Dict[str, np.ndarray]] = None,
-                                      auto_organize: bool = True) -> None:
+                                      auto_organize: bool = True,
+                                      time_offset: float = 0.0) -> None:
         """
         Create a combined multi-panel figure with both 1D ortho-ray and 2D surface plots.
 
@@ -1146,6 +1147,7 @@ class YTFieldPlotter:
             title: Custom plot title (shown at the top)
             contour_lines: Optional dictionary of named contour lines to overlay
             auto_organize: If True, organize as output_path/FieldName/plt00100_combined.png
+            time_offset: Time offset in seconds to add to dataset time (for correcting restart times, etc.)
         """
         if not self.yt_available:
             raise PlotGenerationError("combined_localized_figure", "YT not available")
@@ -1298,8 +1300,9 @@ class YTFieldPlotter:
             # Store x-limits for alignment (will be applied after 2D plot is created)
             ray_xlim = (ray_coords.min(), ray_coords.max())
 
-            # Add time annotation with full precision
-            time_ms = float(dataset.current_time) * 1000  # Convert to ms
+            # Add time annotation with full precision (apply time offset if provided)
+            time_corrected = float(dataset.current_time) + time_offset  # Apply offset in seconds
+            time_ms = time_corrected * 1000  # Convert to ms
             time_text = f't={time_ms} ms'
             ax1.text(0.98, 0.95, time_text, transform=ax1.transAxes,
                     fontsize=12, verticalalignment='top', horizontalalignment='right',
@@ -1378,6 +1381,9 @@ class YTFieldPlotter:
             else:
                 fig.suptitle(pretty_name, fontsize=16, fontweight='bold', y=0.98)
 
+            # Apply tight layout before saving
+            plt.tight_layout()
+
             # Save plot
             plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
             plt.close(fig)
@@ -1394,7 +1400,8 @@ class YTFieldPlotter:
                                       output_path: Union[Path, str], axis: Union[str, int] = 'z',
                                       normal_axis: str = 'x',
                                       contour_lines: Optional[Dict[str, np.ndarray]] = None,
-                                      auto_organize: bool = True) -> None:
+                                      auto_organize: bool = True,
+                                      time_offset: float = 0.0) -> None:
         """
         Batch create combined figures (1D+2D) for multiple fields.
 
@@ -1415,6 +1422,7 @@ class YTFieldPlotter:
             normal_axis: Reference axis for forward/backward bounds ('x', 'y', or 'z')
             contour_lines: Optional dictionary of contour lines to overlay on all plots
             auto_organize: If True, organize as output_path/FieldName/plt00100_combined.png
+            time_offset: Time offset in seconds to add to dataset time (for correcting restart times, etc.)
 
         Example:
             >>> plotter = YTFieldPlotter(figure_size=(12, 10), dpi=150)
@@ -1461,7 +1469,8 @@ class YTFieldPlotter:
                     zlim=field_config.get('zlim', None),
                     title=None,  # Auto-generated title
                     contour_lines=contour_lines,
-                    auto_organize=auto_organize
+                    auto_organize=auto_organize,
+                    time_offset=time_offset
                 )
                 print(f"    [OK] {field_name}")
 
