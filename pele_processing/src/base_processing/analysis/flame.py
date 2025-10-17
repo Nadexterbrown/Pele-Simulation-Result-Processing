@@ -260,10 +260,12 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
         flame_indices = np.argmax(data.heat_release_rate)
 
         # Primary criterion: temperature threshold
-        temperature_flame_idx = np.where(data.temperature >= self.flame_temperature)[0][-1]
+        temperature_flame_idx = np.where(data.temperature >= self.flame_temperature)[0]
 
         if len(temperature_flame_idx) == 0:
             raise WaveNotFoundError("flame", f"No points above {self.flame_temperature}K")
+        else:
+            temperature_flame_idx = temperature_flame_idx[-1]
 
         # Check agreement between methods
         if abs(flame_indices - temperature_flame_idx) > 10:
