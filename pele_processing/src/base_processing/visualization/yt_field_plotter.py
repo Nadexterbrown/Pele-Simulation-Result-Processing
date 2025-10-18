@@ -1300,13 +1300,10 @@ class YTFieldPlotter:
             # Store x-limits for alignment (will be applied after 2D plot is created)
             ray_xlim = (ray_coords.min(), ray_coords.max())
 
-            # Add time annotation with full precision (apply time offset if provided)
+            # Calculate time for title (apply time offset if provided)
             time_corrected = float(dataset.current_time) + time_offset  # Apply offset in seconds
             time_ms = time_corrected * 1000  # Convert to ms
             time_text = f't={time_ms} ms'
-            ax1.text(0.98, 0.95, time_text, transform=ax1.transAxes,
-                    fontsize=12, verticalalignment='top', horizontalalignment='right',
-                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
             # BOTTOM PANEL: 2D Surface Plot
             ax2 = fig.add_subplot(gs[1])
@@ -1375,11 +1372,12 @@ class YTFieldPlotter:
                 ax1.set_xlim(x_min, x_max)
                 ax2.set_xlim(x_min, x_max)
 
-            # Add overall title - just the field name
+            # Add overall title with field name and time on second line
             if title:
-                fig.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
+                full_title = f'{title}\n{time_text}'
             else:
-                fig.suptitle(pretty_name, fontsize=16, fontweight='bold', y=0.98)
+                full_title = f'{pretty_name}\n{time_text}'
+            fig.suptitle(full_title, fontsize=16, fontweight='bold', y=0.98)
 
             # Apply tight layout before saving
             plt.tight_layout()
