@@ -1290,7 +1290,7 @@ class YTFieldPlotter:
             ax1.plot(ray_coords, ray_field_data_converted, linewidth=2, color='navy')
 
             # Set axis labels with symbols and units
-            ax1.set_xlabel(f'{axis_names[normal_axis_idx].upper()} (cm)')
+            # No x-label on line plot for cleaner layout
             if field_units:
                 ax1.set_ylabel(f'{field_symbol} ({field_units})')
             else:
@@ -1332,9 +1332,9 @@ class YTFieldPlotter:
             contour = ax2.tricontourf(plot_x, plot_y, field_data_plot,
                                      levels=levels, cmap=colormap)
 
-            # Add colorbar
+            # Add colorbar at bottom
             cbar = plt.colorbar(contour, ax=ax2, label=field_label,
-                              orientation='horizontal', pad=0.08, location='top')
+                              orientation='horizontal', pad=0.08, location='bottom')
 
             # Apply color limits if specified
             if zlim is not None:
