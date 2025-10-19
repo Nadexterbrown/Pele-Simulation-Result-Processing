@@ -1273,12 +1273,8 @@ class YTFieldPlotter:
             # Create figure with 2 subplots (top and bottom)
             fig = plt.figure(figsize=(12, 10), dpi=self.dpi)
 
-            # Use GridSpec for better control over layout
-            import matplotlib.gridspec as gridspec
-            gs = gridspec.GridSpec(2, 1, height_ratios=[1, 1.5], hspace=0.3)
-
             # TOP PANEL: 1D Ortho-Ray Plot
-            ax1 = fig.add_subplot(gs[0])
+            ax1 = plt.subplot(2, 1, 1)
 
             # Get field symbol, units, and conversion factor
             field_symbol, field_units, conversion_factor = get_field_symbol_and_units(pele_field)
@@ -1292,21 +1288,26 @@ class YTFieldPlotter:
             # Set axis labels with symbols and units
             # No x-label on line plot for cleaner layout
             if field_units:
-                ax1.set_ylabel(f'{field_symbol} ({field_units})')
+                ax1.set_ylabel(f'{field_symbol} ({field_units})', fontsize=12)
             else:
-                ax1.set_ylabel(field_symbol)
+                ax1.set_ylabel(field_symbol, fontsize=12)
             ax1.grid(True, alpha=0.3)
-
-            # Store x-limits for alignment (will be applied after 2D plot is created)
-            ray_xlim = (ray_coords.min(), ray_coords.max())
+            ax1.set_xlim(ray_coords.min(), ray_coords.max())
 
             # Calculate time for title (apply time offset if provided)
             time_corrected = float(dataset.current_time) + time_offset  # Apply offset in seconds
             time_ms = time_corrected * 1000  # Convert to ms
             time_text = f't={time_ms} ms'
 
+            # Add title to top panel with field name and time
+            if title:
+                full_title = f'{title}\n\n{time_text}'
+            else:
+                full_title = f'{pretty_name}\n\n{time_text}'
+            ax1.set_title(full_title, fontsize=14, fontweight='bold')
+
             # BOTTOM PANEL: 2D Surface Plot
-            ax2 = fig.add_subplot(gs[1])
+            ax2 = plt.subplot(2, 1, 2)
 
             # Apply unit conversion to 2D data
             field_data_2d_converted = field_data_2d * conversion_factor
@@ -1330,8 +1331,8 @@ class YTFieldPlotter:
                                      levels=levels, cmap=colormap)
 
             # Add colorbar at bottom
-            cbar = plt.colorbar(contour, ax=ax2, label=field_label,
-                              orientation='horizontal', pad=0.08, location='bottom')
+            cbar = plt.colorbar(contour, ax=ax2, orientation='horizontal', pad=0.15, location='bottom')
+            cbar.set_label(field_label, fontsize=11)
 
             # Apply color limits if specified
             if zlim is not None:
@@ -1351,8 +1352,8 @@ class YTFieldPlotter:
                         ax2.plot(line_x, line_y, label=line_name, linewidth=2, color='red', linestyle='--')
 
             # Set labels and formatting with proper units
-            ax2.set_xlabel(f'{xlabel_2d} (cm)')
-            ax2.set_ylabel(f'{ylabel_2d} (cm)')
+            ax2.set_xlabel(f'{xlabel_2d} (cm)', fontsize=12)
+            ax2.set_ylabel(f'{ylabel_2d} (cm)', fontsize=12)
             ax2.set_aspect('equal', adjustable='box')
 
             if contour_lines:
@@ -1372,14 +1373,7 @@ class YTFieldPlotter:
                 ax1.set_xlim(x_min, x_max)
                 ax2.set_xlim(x_min, x_max)
 
-            # Add overall title with field name and time on second line
-            if title:
-                full_title = f'{title}\n{time_text}'
-            else:
-                full_title = f'{pretty_name}\n{time_text}'
-            fig.suptitle(full_title, fontsize=16, fontweight='bold', y=0.98)
-
-            # Apply tight layout before saving
+            # Apply tight layout to eliminate white space
             plt.tight_layout()
 
             # Save plot
