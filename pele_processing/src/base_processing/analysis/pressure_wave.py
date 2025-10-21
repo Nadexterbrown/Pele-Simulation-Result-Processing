@@ -127,12 +127,6 @@ class PelePressureWaveAnalyzer(PressureWaveAnalyzer):
         # Get the field data
         if field == 'pressure':
             field_data = data.pressure
-        elif field == 'temperature':
-            field_data = data.temperature
-        elif field == 'density':
-            field_data = data.density
-        elif field == 'heat_release_rate' and data.heat_release_rate is not None:
-            field_data = data.heat_release_rate
         else:
             raise ValueError(f"Invalid or unavailable field: {field}")
 
@@ -168,33 +162,8 @@ class PelePressureWaveAnalyzer(PressureWaveAnalyzer):
         elif method == DetectionMethod.MAX_VALUE:
             # Find maximum value location
             wave_idx = np.argmax(field_data)
-
-            # Validate that maximum is significant
-            max_val = field_data[wave_idx]
-            mean_val = np.mean(field_data)
-            if max_val < 1.5 * mean_val:  # Require max to be 1.5x mean
-                raise WaveNotFoundError(wave_type.value,
-                                      f"No significant maximum found in {field}")
         else:
             raise ValueError(f"Unknown detection method: {method}")
-
-        # Special handling for flame detection with species validation
-        if wave_type == WaveType.FLAME and data.species_data:
-            # Secondary validation with Y(HO2) species if available
-            if 'HO2' in data.species_data.mass_fractions:
-                species_data = data.species_data.mass_fractions['HO2']
-                if isinstance(species_data, np.ndarray):
-                    species_flame_idx = np.argmax(species_data)
-
-                    # Check agreement between methods
-                    if abs(wave_idx - species_flame_idx) > 10:
-                        print(f'Warning: Wave location from {field} differs from species by > 10 cells\n'
-                              f'{field} location: {data.coordinates[wave_idx]:.6f} m\n'
-                              f'Species location: {data.coordinates[species_flame_idx]:.6f} m')
-
-                    # Optionally prefer species-based detection for flames
-                    if field == 'temperature':
-                        wave_idx = species_flame_idx
 
         return wave_idx, data.coordinates[wave_idx]
 
