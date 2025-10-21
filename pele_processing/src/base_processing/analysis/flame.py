@@ -592,22 +592,25 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                 # Extract the fields we need for flame detection
                 x_coords = ray['boxlib','x'].to_value() / 100  # Convert to meters
                 temperature = ray['boxlib','Temp'].to_value()  # Temperature in K
+                heat_release_rate = ray['boxlib','heatRelease'].to_value()
 
                 # Sort by x-coordinate to ensure proper ordering
                 sort_indices = np.argsort(x_coords)
                 x_coords = x_coords[sort_indices]
                 temperature = temperature[sort_indices]
+                heat_release_rate = heat_release_rate[sort_indices]
 
                 # Create a minimal FieldData object for find_wave_position
                 # We only need coordinates and temperature, plus optional species data
                 class MinimalFieldData:
                     """Minimal FieldData for flame detection"""
-                    def __init__(self, coordinates, temperature):
+                    def __init__(self, coordinates, temperature, heat_release_rate):
                         self.coordinates = coordinates
                         self.temperature = temperature
+                        self.heat_release_rate = heat_release_rate
                         self.species_data = None
 
-                ray_data = MinimalFieldData(x_coords, temperature)
+                ray_data = MinimalFieldData(x_coords, temperature, heat_release_rate)
 
                 # Try to get species data if available for better flame detection
                 try:
