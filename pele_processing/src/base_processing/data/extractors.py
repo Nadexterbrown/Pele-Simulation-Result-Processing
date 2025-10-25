@@ -255,8 +255,9 @@ class PeleDataExtractor(DataExtractor):
         if field_name in field_names_in_data:
             try:
                 hrr_raw = ray["boxlib", field_name][sort_idx].to_value()
-                print(f"  Successfully extracted {field_name}: {len(hrr_raw)} points, range [{np.min(hrr_raw):.2e}, {np.max(hrr_raw):.2e}] units")
-                return hrr_raw
+                print(f"  Successfully extracted {field_name}: {len(hrr_raw)} points, range [{np.min(hrr_raw) * 0.1:.2e}, {np.max(hrr_raw) * 0.1:.2e}] W/m³")
+                # Convert from CGS (erg/(cm^3*s)) to SI (W/m^3)
+                return self.unit_converter.convert_value(hrr_raw, 'erg/(cm^3*s)', 'W/m^3')
             except Exception as e:
                 print(f"  Could not extract {field_name}: {e}")
         
@@ -302,7 +303,8 @@ class PeleDataExtractor(DataExtractor):
         if field_name in field_names_in_data:
             try:
                 conductivity_raw = ray["boxlib", field_name][sort_idx].to_value()
-                return self.unit_converter.convert_value(conductivity_raw, 'W/(cm*K)', 'W/(m*K)')
+                # Convert from CGS (erg/(s*cm*K)) to SI (W/(m*K))
+                return self.unit_converter.convert_value(conductivity_raw, 'erg/(s*cm*K)', 'W/(m*K)')
             except Exception as e:
                 print(f"  Could not extract {field_name}: {e}")
         

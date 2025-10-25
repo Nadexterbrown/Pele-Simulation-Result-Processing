@@ -28,6 +28,8 @@ class UnitConverter(UnitConverterInterface):
         'Pa': 1.0, 'kPa': 1e3, 'MPa': 1e6, 'bar': 1e5, 'atm': 101325,
         # Energy
         'J': 1.0, 'kJ': 1e3, 'MJ': 1e6, 'cal': 4.184, 'kcal': 4184,
+        # Power
+        'W': 1.0,  # Watt = J/s
         # Amount
         'mol': 1.0, 'kmol': 1e3,
     }
@@ -91,6 +93,11 @@ class UnitConverter(UnitConverterInterface):
         """Parse unit group with powers (e.g., 'm^2*s')."""
         if not unit_group:
             return 1.0
+
+        # Strip parentheses if present
+        unit_group = unit_group.strip()
+        if unit_group.startswith('(') and unit_group.endswith(')'):
+            unit_group = unit_group[1:-1]
 
         # Split by '*' for multiple units
         units = [u.strip() for u in unit_group.split('*')]
@@ -165,8 +172,8 @@ class PeleUnitConverter(UnitConverter):
             'Pressure': 0.1,  # dyne/cm^2 to Pa
             'Density': 1000,  # g/cm^3 to kg/m^3
             'Viscosity': 0.1,  # g/(cm*s) to Pa*s
-            'Conductivity': 418.4,  # cal/(s*cm*K) to W/(m*K)
-            'Heat Release Rate': 4.184e7,  # erg/(s*cm^3) to W/m^3
+            'Conductivity': 1e-5,  # erg/(s*cm*K) to W/(m*K)
+            'Heat Release Rate': 0.1,  # erg/(cm^3*s) to W/m^3
             'X Velocity': 0.01,  # cm/s to m/s
             'Y Velocity': 0.01,  # cm/s to m/s
             'Sound speed': 0.01,  # cm/s to m/s
