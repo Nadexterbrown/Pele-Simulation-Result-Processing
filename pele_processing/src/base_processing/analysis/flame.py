@@ -592,7 +592,7 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
                 # Extract the fields we need for flame detection
                 x_coords = ray['boxlib','x'].to_value() / 100  # Convert to meters
                 temperature = ray['boxlib','Temp'].to_value()  # Temperature in K
-                heat_release_rate = ray['boxlib','heatRelease'].to_value()
+                heat_release_rate = ray['boxlib','heatRelease'].to_value() * 0.1  # Convert erg/(cm^3*s) to W/m^3
 
                 # Sort by x-coordinate to ensure proper ordering
                 sort_indices = np.argsort(x_coords)
