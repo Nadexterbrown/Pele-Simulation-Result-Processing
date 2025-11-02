@@ -132,7 +132,7 @@ def test_cj_analyzer():
     print()
 
     # Define equivalence ratio array
-    phi_array = np.linspace(0.2, 2.0, 20)  # Reduced number for faster testing
+    phi_array = np.linspace(0.2, 2.0, 200)  # Reduced number for faster testing
 
     print("="*60)
     print("Testing Chapman-Jouguet Analyzer")
