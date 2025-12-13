@@ -12,13 +12,15 @@ from .flame_baseline import FlameBaselineFitter, FlameBaselineResult
 class CanteraLaminarFlame:
     """Calculate free flame properties using Cantera."""
 
-    def __init__(self, mechanism_file: str = 'h2o2.yaml', restart_file: Optional[str] = None):
+    def __init__(self, mechanism_file: str = 'h2o2.yaml', restart_file: Optional[str] = None,
+                 mpi_rank: Optional[int] = None):
         """
         Initialize Cantera free flame calculator.
 
         Args:
             mechanism_file: Path to Cantera mechanism file (e.g., 'h2o2.yaml', 'gri30.yaml')
-            restart_file: Path to XML file for saving/loading flame solutions (default: temp file)
+            restart_file: Path to YAML file for saving/loading flame solutions (default: auto-generated)
+            mpi_rank: MPI rank for per-process restart files. If None, will auto-detect MPI or use 0.
         """
         try:
             import cantera as ct
@@ -27,12 +29,23 @@ class CanteraLaminarFlame:
             self.gas = None
             self.flame = None
 
+            # Auto-detect MPI rank if not provided
+            if mpi_rank is None:
+                mpi_rank = self._get_mpi_rank()
+            self.mpi_rank = mpi_rank
+
             # Setup restart file path - use YAML format for Cantera 3.0+
+            # Include MPI rank in filename to avoid conflicts between processes
             if restart_file is None:
-                # Use a temporary file in the current working directory
-                self.restart_file = os.path.join(os.getcwd(), 'cantera_flame_restart.yaml')
+                # Use a temporary file in the current working directory with rank suffix
+                self.restart_file = os.path.join(
+                    os.getcwd(),
+                    f'cantera_flame_restart_rank{self.mpi_rank}.yaml'
+                )
             else:
-                self.restart_file = restart_file
+                # If user provided a restart file, add rank suffix before extension
+                base, ext = os.path.splitext(restart_file)
+                self.restart_file = f"{base}_rank{self.mpi_rank}{ext}"
 
             self.has_saved_solution = False
             self.last_successful_T = None
@@ -40,6 +53,16 @@ class CanteraLaminarFlame:
 
         except ImportError:
             raise ImportError("Cantera is required for CanteraLaminarFlame but is not installed.")
+
+    @staticmethod
+    def _get_mpi_rank() -> int:
+        """Auto-detect MPI rank, return 0 if MPI not available or not running."""
+        try:
+            from mpi4py import MPI
+            comm = MPI.COMM_WORLD
+            return comm.Get_rank()
+        except (ImportError, RuntimeError):
+            return 0
 
     def setup(self, T: float, P: float, composition: Dict[str, float]) -> None:
         """
@@ -65,10 +88,18 @@ class CanteraLaminarFlame:
         """Save the current flame solution to YAML file for restart."""
         if self.flame is not None:
             try:
-                # For YAML format, use overwrite=True to replace existing solution
+                # Delete existing file first to avoid Cantera's "bad conversion" error
+                # when overwriting files with potentially incompatible format
+                if os.path.exists(self.restart_file):
+                    try:
+                        os.remove(self.restart_file)
+                        logging.debug(f"Removed existing restart file: {self.restart_file}")
+                    except Exception as e:
+                        logging.warning(f"Could not remove existing restart file: {e}")
+
+                # Save to fresh file (no overwrite needed since file was deleted)
                 self.flame.save(self.restart_file, name='solution',
-                               description=f'T={self.initial_T:.1f}K, P={self.initial_P/1e5:.1f}bar',
-                               overwrite=True)
+                               description=f'T={self.initial_T:.1f}K, P={self.initial_P/1e5:.1f}bar')
                 self.has_saved_solution = True
                 self.last_successful_T = self.initial_T
                 self.last_successful_P = self.initial_P
