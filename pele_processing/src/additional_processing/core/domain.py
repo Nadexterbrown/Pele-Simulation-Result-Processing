@@ -19,7 +19,8 @@ class CJProperties:
     pressure: float  # in Pa
     temperature: float  # in K
     density: float  # in kg/m^3
-    velocity: float  # in m/s
+    reactant_velocity: float  # wave speed relative to reactants in m/s
+    product_velocity: float  # wave speed relative to products in m/s
     specific_energy: float  # in J/kg
     specific_volume: float  # in m^3/kg
     sound_speed: float  # in m/s
@@ -34,7 +35,8 @@ class CJProperties:
 
     def __str__(self) -> str:
         """String representation of CJ state."""
-        return (f"CJ {self.cj_type.value}: v={self.velocity:.1f} m/s, "
+        return (f"CJ {self.cj_type.value}: v_reactant={self.reactant_velocity:.1f} m/s, "
+                f"v_product={self.product_velocity:.1f} m/s, "
                 f"T={self.temperature:.1f} K, P={self.pressure/1e5:.2f} bar, "
                 f"ρ₂/ρ₁={self.density_ratio:.3f}")
 
