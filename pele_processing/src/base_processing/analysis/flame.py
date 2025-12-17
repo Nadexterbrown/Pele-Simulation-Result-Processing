@@ -385,9 +385,11 @@ class PeleFlameAnalyzer(FlameAnalyzer, WaveTracker):
             if contour_points is None or len(contour_points) == 0:
                 raise FlameAnalysisError("consumption_rate", "No contour points provided")
 
-            # Create bounding box around contour
-            min_x = np.min(contour_points[:, 0]) - 10e-4
-            max_x = np.max(contour_points[:, 0]) + 10e-4
+            # Create bounding box around contour (clamped to domain bounds)
+            domain_min_x = dataset.domain_left_edge[0].to_value() / 100  # Convert cm to m
+            domain_max_x = dataset.domain_right_edge[0].to_value() / 100  # Convert cm to m
+            min_x = np.maximum(np.min(contour_points[:, 0]) - 10e-4, domain_min_x)
+            max_x = np.minimum(np.max(contour_points[:, 0]) + 10e-4, domain_max_x)
             min_y = np.min(contour_points[:, 1])
             max_y = np.max(contour_points[:, 1])
 
