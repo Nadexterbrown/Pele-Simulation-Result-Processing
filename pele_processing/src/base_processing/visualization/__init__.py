@@ -19,7 +19,7 @@ from .formatters import (
 
 # Specialized visualizations
 from .specialized import (
-    SchlierenVisualizer, StreamlineVisualizer, ContourVisualizer
+    SchlierenMode, SchlierenVisualizer, StreamlineVisualizer, ContourVisualizer
 )
 
 # YT Field Plotter
@@ -46,6 +46,7 @@ __all__ = [
     'create_formatter',
 
     # Specialized
+    'SchlierenMode',
     'SchlierenVisualizer',
     'StreamlineVisualizer',
     'ContourVisualizer',
