@@ -49,18 +49,22 @@ except ImportError:
 
 from base_processing.data.loaders import YTDataLoader
 from base_processing.visualization import YTFieldPlotter
+from base_processing.visualization import SchlierenVisualizer, SchlierenMode
 from base_processing import create_data_extractor, create_flame_analyzer, create_unit_converter, Direction, WaveType
 
 # ============================================================================
 # CONFIGURATION - Edit these paths and parameters
 # ============================================================================
 
+# Resolve paths relative to this script's location (not CWD)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+
 # Data directory containing plt files
 # UPDATE THIS to point to your actual data directory
-DATA_DIR = Path('../../pele_data_2d_level_6')
+DATA_DIR = (_SCRIPT_DIR / "../../pele_data_2d_level_6").resolve()
 
 # Output directory for results
-OUTPUT_DIR = Path(f"../../Processed-MPI-Global-Results-V3.0.0")
+OUTPUT_DIR = (_SCRIPT_DIR / "../../Processed-MPI-Global-Results-V3.0.0").resolve()
 
 # Configuration for tracking and offsets (from main.py)
 EXTRACTION_LOCATION = (0.0462731 + (8.7e-5 / 2)) / 100  # meters - y-location for extraction
@@ -74,7 +78,7 @@ BACKWARD_BOUND = 1e-4   # 10mm backward of flame
 X_OFFSET = 0.0
 
 # Y-direction zoom configuration
-ENABLE_Y_ZOOM = True  # Set to True to enable y-direction zooming
+ENABLE_Y_ZOOM = False  # Set to True to enable y-direction zooming
 Y_MIN = EXTRACTION_LOCATION - 1e-4           # Minimum y-coordinate (meters) - used if ENABLE_Y_ZOOM=True
 Y_MAX = EXTRACTION_LOCATION + 1e-4         # Maximum y-coordinate (meters) - used if ENABLE_Y_ZOOM=True
 
@@ -102,6 +106,12 @@ COMBINED_BACKWARD_BOUND = 0.001   # 10mm backward of flame for combined figures
 
 # Dataset stride/skip configuration
 DATASET_STRIDE = 1  # Process every Nth dataset (1 = process all, 10 = every 10th, etc.)
+
+# Schlieren visualization configuration
+CREATE_SCHLIEREN = True  # Set to True to generate Schlieren images
+SCHLIEREN_MODE = SchlierenMode.Y  # Y = horizontal knife edge (transverse waves), X = vertical, COMBINED = full gradient
+SCHLIEREN_FIELD = 'pressure'  # Field to compute gradients from (pressure better for transverse waves)
+SCHLIEREN_SENSITIVITY = 1.0  # Sensitivity of knife-edge effect (higher = more contrast)
 
 # ============================================================================
 # END CONFIGURATION
@@ -163,7 +173,11 @@ def process_single_dataset(
     create_field_plots: bool = True,
     create_combined_figures: bool = False,
     combined_forward_bound: float = None,
-    combined_backward_bound: float = None
+    combined_backward_bound: float = None,
+    create_schlieren: bool = False,
+    schlieren_mode: SchlierenMode = SchlierenMode.Y,
+    schlieren_field: str = 'density',
+    schlieren_sensitivity: float = 1.0
 ):
     """
     Process a single dataset - detect flame and create localized plots.
@@ -185,6 +199,10 @@ def process_single_dataset(
         create_combined_figures: If True, also create combined (1D+2D) figures
         combined_forward_bound: Distance forward of flame (meters) for combined figures
         combined_backward_bound: Distance backward of flame (meters) for combined figures
+        create_schlieren: If True, generate Schlieren visualizations
+        schlieren_mode: SchlierenMode controlling knife-edge orientation
+        schlieren_field: Field to compute density gradients from
+        schlieren_sensitivity: Sensitivity of knife-edge effect
     """
     print(f"\n  Processing: {plt_file.name}")
     print(f"    Time: {dataset.current_time}")
@@ -306,9 +324,47 @@ def process_single_dataset(
         except Exception as e:
             print(f"      Error creating combined figures: {e}")
 
+    # ============================================================================
+    # OPTIONAL: Create Schlieren visualizations
+    # ============================================================================
+    if create_schlieren:
+        mode_labels = {
+            SchlierenMode.X: 'Vertical Knife Edge (d/dx)',
+            SchlierenMode.Y: 'Horizontal Knife Edge (d/dy)',
+            SchlierenMode.COMBINED: 'Combined (|grad|)',
+        }
+        print(f"\n    Creating Schlieren image — {mode_labels[schlieren_mode]}...")
 
-def generate_mp4_animations(output_dir: Path, fields_to_plot: List[Dict]) -> None:
-    """Generate MP4 animations from saved PNG frames for for the each field."""
+        schlieren_dir = output_base / "Field-Plots" / "Schlieren"
+        schlieren_dir.mkdir(parents=True, exist_ok=True)
+
+        output_file = schlieren_dir / f"{plt_file.name}_schlieren.png"
+
+        try:
+            schlieren_viz = SchlierenVisualizer(figure_size=(10, 8), dpi=150)
+            schlieren_viz.generate_schlieren(
+                dataset=dataset,
+                output_path=output_file,
+                field=schlieren_field,
+                mode=schlieren_mode,
+                center_point=center_point,
+                forward_bound=forward_bound_cm,
+                backward_bound=backward_bound_cm,
+                axis='z',
+                normal_axis='x',
+                enable_y_zoom=enable_y_zoom,
+                y_min=y_min * 100,
+                y_max=y_max * 100,
+                sensitivity=schlieren_sensitivity
+            )
+            print(f"      [OK] Schlieren saved to: {output_file.name}")
+        except Exception as e:
+            print(f"      [FAILED] Schlieren: {e}")
+
+
+def generate_mp4_animations(output_dir: Path, fields_to_plot: List[Dict],
+                            create_schlieren: bool = False) -> None:
+    """Generate MP4 animations from saved PNG frames for each field and Schlieren."""
     print(f"\n{'='*80}")
     print("GENERATING MP4 ANIMATIONS FROM FRAMES")
     print(f"{'='*80}")
@@ -362,6 +418,30 @@ def generate_mp4_animations(output_dir: Path, fields_to_plot: List[Dict]) -> Non
             except Exception as e:
                 print(f"    [FAILED] Failed to create MP4: {e}")
 
+        # Generate Schlieren animation if enabled
+        if create_schlieren:
+            schlieren_dir = output_dir / 'Field-Plots' / 'Schlieren'
+            if schlieren_dir.exists():
+                png_files = sorted(schlieren_dir.glob('*.png'))
+                if png_files:
+                    print(f"  Processing Schlieren: {len(png_files)} frames")
+                    output_file = video_output_dir / "Schlieren_animation.mp4"
+                    try:
+                        print(f"    Creating Schlieren MP4 animation...")
+                        animator.create_animation(
+                            frame_directory=schlieren_dir,
+                            output_path=output_file,
+                            frame_rate=30.0,
+                            format='mp4'
+                        )
+                        print(f"    [SUCCESS] Saved to: {output_file.name}")
+                    except Exception as e:
+                        print(f"    [FAILED] Failed to create Schlieren MP4: {e}")
+                else:
+                    print(f"  Skipping Schlieren - no frames found")
+            else:
+                print(f"  Skipping Schlieren - no Schlieren directory found")
+
         print(f"\nAll animations saved to: {video_output_dir}")
 
     except Exception as e:
@@ -409,6 +489,19 @@ def main():
                 print(f"    Backward bound: {COMBINED_BACKWARD_BOUND:.6f} m")
             else:
                 print(f"    Combined figures (1D+2D): DISABLED")
+            print(f"\n  Schlieren Settings:")
+            if CREATE_SCHLIEREN:
+                mode_labels = {
+                    SchlierenMode.X: 'Vertical Knife Edge (d/dx)',
+                    SchlierenMode.Y: 'Horizontal Knife Edge (d/dy)',
+                    SchlierenMode.COMBINED: 'Combined (|grad|)',
+                }
+                print(f"    Schlieren: ENABLED")
+                print(f"    Mode: {mode_labels[SCHLIEREN_MODE]}")
+                print(f"    Field: {SCHLIEREN_FIELD}")
+                print(f"    Sensitivity: {SCHLIEREN_SENSITIVITY}")
+            else:
+                print(f"    Schlieren: DISABLED")
             print(f"\n  Fields to plot:")
             for field_config in FIELDS_TO_PLOT:
                 print(f"    - {field_config['field']}")
@@ -496,7 +589,11 @@ def main():
                     create_field_plots=CREATE_FIELD_PLOTS,
                     create_combined_figures=CREATE_COMBINED_FIGURES,
                     combined_forward_bound=COMBINED_FORWARD_BOUND,
-                    combined_backward_bound=COMBINED_BACKWARD_BOUND
+                    combined_backward_bound=COMBINED_BACKWARD_BOUND,
+                    create_schlieren=CREATE_SCHLIEREN,
+                    schlieren_mode=SCHLIEREN_MODE,
+                    schlieren_field=SCHLIEREN_FIELD,
+                    schlieren_sensitivity=SCHLIEREN_SENSITIVITY
                 )
 
                 success_count += 1
@@ -539,10 +636,13 @@ def main():
                 print(f"  Field plots: {(output_dir / 'Field-Plots').absolute()}")
             if CREATE_COMBINED_FIGURES:
                 print(f"  Combined figures: {(output_dir / 'Combined-Figures').absolute()}")
+            if CREATE_SCHLIEREN:
+                print(f"  Schlieren: {(output_dir / 'Field-Plots' / 'Schlieren').absolute()}")
             print("="*80)
 
             # Generate MP4 animations from frames (sequential, rank 0 only)
-            generate_mp4_animations(output_dir, FIELDS_TO_PLOT)
+            generate_mp4_animations(output_dir, FIELDS_TO_PLOT,
+                                    create_schlieren=CREATE_SCHLIEREN)
 
             print(f"\n{'='*80}")
             print("All processing complete!")
