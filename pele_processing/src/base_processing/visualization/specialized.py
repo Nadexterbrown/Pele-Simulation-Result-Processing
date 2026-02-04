@@ -1,12 +1,14 @@
 """
 Specialized visualization techniques for Pele processing.
 """
+import shutil
 import numpy as np
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from enum import Enum
 
 import matplotlib.pyplot as plt
+import yt
 
 from ..core.exceptions import PlotGenerationError
 
@@ -26,41 +28,127 @@ class SchlierenMode(Enum):
     COMBINED = "combined"
 
 
-class SchlierenVisualizer:
-    """Generate Schlieren-like visualizations from density gradients.
+class SchlierenField(Enum):
+    """Base field for Schlieren computation."""
+    DENSITY = "density"
+    PRESSURE = "pressure"
 
-    Uses YT covering grid extraction (same approach as YTFieldPlotter) for
-    consistent, high-resolution data on the AMR grid.
+
+def register_schlieren_fields(ds, base_field: str = "density") -> None:
+    """Register gradient fields with a YT dataset for Schlieren visualization.
+
+    Uses YT's add_gradient_fields() which computes gradients using second-order
+    centered differences with proper AMR handling. Also creates absolute value
+    versions for log-scale visualization.
+
+    Args:
+        ds: YT dataset to register fields with.
+        base_field: The base field name to compute gradients from ("density" or "pressure").
+    """
+    field_tuple = ("boxlib", base_field)
+
+    # Check if the field exists in the dataset
+    if field_tuple not in ds.field_list and field_tuple not in ds.derived_field_list:
+        raise ValueError(f"Field {field_tuple} not found in dataset. "
+                        f"Available fields: {[f for f in ds.field_list if f[0] == 'boxlib']}")
+
+    # Check if gradient fields already exist (avoid calling add_gradient_fields twice)
+    gradient_field_x = ("boxlib", f"{base_field}_gradient_x")
+    if gradient_field_x not in ds.derived_field_list:
+        # Use YT's built-in gradient field generation (second-order centered differences)
+        ds.add_gradient_fields(field_tuple)
+
+    # Create absolute value versions for log-scale visualization
+    abs_field_x = ("boxlib", f"{base_field}_gradient_x_abs")
+    if abs_field_x not in ds.derived_field_list:
+        # Get units from the gradient fields
+        grad_units = str(ds.field_info["boxlib", f"{base_field}_gradient_x"].units)
+
+        # Register abs versions
+        ds.add_field(
+            ("boxlib", f"{base_field}_gradient_x_abs"),
+            function=lambda field, data, bf=base_field: np.abs(data["boxlib", f"{bf}_gradient_x"]),
+            sampling_type="cell",
+            units=grad_units,
+            force_override=True,
+        )
+        ds.add_field(
+            ("boxlib", f"{base_field}_gradient_y_abs"),
+            function=lambda field, data, bf=base_field: np.abs(data["boxlib", f"{bf}_gradient_y"]),
+            sampling_type="cell",
+            units=grad_units,
+            force_override=True,
+        )
+
+
+def get_schlieren_field_name(base_field: SchlierenField, mode: SchlierenMode, use_abs: bool = False) -> str:
+    """Get the YT gradient field name for a Schlieren configuration.
+
+    Args:
+        base_field: The base field (DENSITY or PRESSURE).
+        mode: The Schlieren mode (X, Y, or COMBINED).
+        use_abs: If True, return the absolute value field name (for log scale).
+
+    Returns:
+        The field name string, e.g., "pressure_gradient_y" or "pressure_gradient_y_abs".
+    """
+    if mode == SchlierenMode.COMBINED:
+        # Magnitude is already positive, no abs needed
+        return f"{base_field.value}_gradient_magnitude"
+    else:
+        suffix = "_abs" if use_abs else ""
+        return f"{base_field.value}_gradient_{mode.value}{suffix}"
+
+
+class SchlierenVisualizer:
+    """Generate Schlieren-like visualizations using YT derived fields.
+
+    Uses YT's native SlicePlot with derived gradient fields for proper AMR handling.
+    This avoids covering grid interpolation artifacts and provides better resolution.
     """
 
-    def __init__(self, figure_size: tuple = (10, 8), dpi: int = 150):
+    def __init__(self, figure_size: tuple = (10, 8), dpi: int = 300):
         self.figure_size = figure_size
         self.dpi = dpi
+        self._fields_registered = False
 
-    def generate_schlieren(self, dataset, output_path: Path,
-                           field: str = 'density',
-                           mode: SchlierenMode = SchlierenMode.COMBINED,
-                           center_point=None,
-                           forward_bound: float = None,
-                           backward_bound: float = None,
-                           axis: str = 'z',
-                           normal_axis: str = 'x',
-                           enable_y_zoom: bool = False,
-                           y_min: float = 0.0,
-                           y_max: float = 0.001,
-                           **kwargs) -> None:
-        """Generate Schlieren visualization using covering grid extraction.
+    def generate_schlieren(
+        self,
+        dataset,
+        output_path: Path,
+        base_field: Union[SchlierenField, str] = SchlierenField.DENSITY,
+        mode: SchlierenMode = SchlierenMode.COMBINED,
+        center_point=None,
+        forward_bound: float = None,
+        backward_bound: float = None,
+        axis: str = 'z',
+        normal_axis: str = 'x',
+        enable_y_zoom: bool = False,
+        y_min: float = 0.0,
+        y_max: float = 0.001,
+        zmin: float = None,
+        zmax: float = None,
+        cmap: str = 'gray',
+        log_scale: bool = False,
+        interpolation: str = None,
+        buff_size: int = 2048,
+        normalize_to_shock: bool = False,
+        shock_sample_width: float = 0.05,
+        **kwargs
+    ) -> None:
+        """Generate Schlieren visualization using YT derived fields and SlicePlot.
 
         Args:
             dataset: YT dataset to visualize.
             output_path: Path to save the output image.
-            field: PeleC field name to compute gradients from (default: 'density').
+            base_field: Base field for gradient computation (SchlierenField.DENSITY
+                or SchlierenField.PRESSURE, or string 'density'/'pressure').
             mode: SchlierenMode controlling the knife-edge orientation.
-                SchlierenMode.X — vertical knife edge, highlights dρ/dx.
-                SchlierenMode.Y — horizontal knife edge, highlights dρ/dy
+                SchlierenMode.X — vertical knife edge, highlights d/dx.
+                SchlierenMode.Y — horizontal knife edge, highlights d/dy
                     (ideal for transverse wave tracking).
                 SchlierenMode.COMBINED — full gradient magnitude (default).
-            center_point: [x, y, z] center for localized extraction (dataset units).
+            center_point: [x, y, z] center for localized view (dataset units).
             forward_bound: Distance forward of center along normal_axis (dataset units).
             backward_bound: Distance backward of center along normal_axis (dataset units).
             axis: Slice axis ('x', 'y', or 'z') — normal to the plotting plane.
@@ -68,138 +156,205 @@ class SchlierenVisualizer:
             enable_y_zoom: Enable y-direction zooming.
             y_min: Minimum y-coordinate (dataset units) for zoom.
             y_max: Maximum y-coordinate (dataset units) for zoom.
-            **kwargs: sensitivity (float), cutoff_angle (float).
+            zmin: Minimum value for colorbar (disables per-frame normalization).
+            zmax: Maximum value for colorbar (disables per-frame normalization).
+            cmap: Colormap name (default: 'gray').
+            log_scale: Use logarithmic scaling for colorbar (default: False).
+            interpolation: Image interpolation method (e.g., 'nearest', 'bilinear',
+                'bicubic', 'gaussian', 'lanczos'). None uses default (nearest).
+            buff_size: Resolution of the fixed resolution buffer (default: 2048).
+                Higher values give more detail for interpolation to work with.
+            normalize_to_shock: If True, normalize colorbar based on gradient values
+                at the shock front (center_point) rather than the entire domain.
+            shock_sample_width: Width (in cm) of the region around shock front to sample
+                for normalization (default: 0.05 cm = 0.5 mm).
+            **kwargs: Additional arguments (unused, for backwards compatibility).
         """
         try:
-            axis_map = {'x': 0, 'y': 1, 'z': 2}
-            axis_idx = axis_map[axis]
-            normal_axis_idx = axis_map[normal_axis]
+            # Convert string to enum if needed
+            if isinstance(base_field, str):
+                base_field = SchlierenField(base_field)
 
-            domain_left = dataset.domain_left_edge.to_ndarray()
-            domain_right = dataset.domain_right_edge.to_ndarray()
+            # Register derived fields for the requested base field
+            register_schlieren_fields(dataset, base_field.value)
 
-            left_edge = domain_left.copy()
-            right_edge = domain_right.copy()
+            # Get the appropriate derived field name
+            # Use abs fields when log_scale is enabled (can't log negative values)
+            field_name = get_schlieren_field_name(base_field, mode, use_abs=log_scale)
+            field_tuple = ("boxlib", field_name)
 
-            # Apply localized bounds along normal axis
+            # Get domain bounds
+            domain_left = dataset.domain_left_edge.to_value()
+            domain_right = dataset.domain_right_edge.to_value()
+
+            # Normalize to shock front if requested
+            if normalize_to_shock and center_point is not None and zmin is None and zmax is None:
+                # Sample gradient in a small region around the shock front
+                shock_x = center_point[0]
+                sample_left = [
+                    shock_x - shock_sample_width,
+                    domain_left[1],
+                    domain_left[2]
+                ]
+                sample_right = [
+                    shock_x + shock_sample_width,
+                    domain_right[1],
+                    domain_right[2]
+                ]
+
+                # Create a region around the shock front
+                shock_region = dataset.region(
+                    center=center_point,
+                    left_edge=sample_left,
+                    right_edge=sample_right
+                )
+
+                # Get gradient values in the shock region
+                try:
+                    grad_data = shock_region[field_tuple].to_ndarray()
+                    if len(grad_data) > 0:
+                        if log_scale:
+                            # For log scale (abs values), use max
+                            zmax = float(np.nanmax(grad_data))
+                            zmin = float(np.nanmin(grad_data[grad_data > 0])) if np.any(grad_data > 0) else zmax / 1000
+                        else:
+                            # For linear scale (signed), use symmetric around zero
+                            max_abs = float(np.nanmax(np.abs(grad_data)))
+                            zmin = -max_abs
+                            zmax = max_abs
+                except Exception as e:
+                    # If sampling fails, fall back to auto-scaling
+                    pass
+
+            # Calculate plot center and width
+            plot_center = None
+            plot_width = None
+
             if center_point is not None and forward_bound is not None and backward_bound is not None:
-                left_edge[normal_axis_idx] = center_point[normal_axis_idx] - backward_bound
-                right_edge[normal_axis_idx] = center_point[normal_axis_idx] + forward_bound
-                left_edge[normal_axis_idx] = max(left_edge[normal_axis_idx], domain_left[normal_axis_idx])
-                right_edge[normal_axis_idx] = min(right_edge[normal_axis_idx], domain_right[normal_axis_idx])
+                # Calculate width along normal axis
+                width_normal = forward_bound + backward_bound
 
-            # For non-slice, non-normal axes: use full domain or y-zoom
-            for i in range(3):
-                if i != normal_axis_idx and i != axis_idx:
-                    if i == 1 and enable_y_zoom:
-                        left_edge[i] = y_min
-                        right_edge[i] = y_max
-                    else:
-                        left_edge[i] = domain_left[i]
-                        right_edge[i] = domain_right[i]
+                # For z-normal slice: plotting x-y plane
+                if axis == 'z':
+                    if normal_axis == 'x':
+                        # View center in x (offset from center_point based on bounds)
+                        view_center_x = center_point[0] + (forward_bound - backward_bound) / 2
 
-            # Single cell in slice direction
-            dx = dataset.index.get_smallest_dx().to_value()
-            left_edge[axis_idx] = domain_left[axis_idx]
-            right_edge[axis_idx] = domain_left[axis_idx] + dx
+                        # Width in y (full domain or y_zoom)
+                        if enable_y_zoom:
+                            width_perp = y_max - y_min
+                            center_y = (y_min + y_max) / 2
+                        else:
+                            width_perp = domain_right[1] - domain_left[1]
+                            center_y = (domain_left[1] + domain_right[1]) / 2
 
-            # Calculate covering grid dimensions at max refinement
-            max_level = dataset.index.max_level
-            dims = [max(1, int((right_edge[i] - left_edge[i]) / dx)) for i in range(3)]
-            dims[axis_idx] = 1
+                        plot_center = [view_center_x, center_y, (domain_left[2] + domain_right[2]) / 2]
+                        plot_width = ((width_normal, 'cm'), (width_perp, 'cm'))
 
-            # Create covering grid — same approach as YTFieldPlotter
-            cg = dataset.covering_grid(
-                level=max_level,
-                left_edge=left_edge,
-                dims=dims,
-                fields=[('boxlib', 'x'), ('boxlib', 'y'), ('boxlib', 'z'), field]
-            )
+                    elif normal_axis == 'y':
+                        # View center in y (offset from center_point based on bounds)
+                        view_center_y = center_point[1] + (forward_bound - backward_bound) / 2
 
-            # Extract and squeeze out singleton slice dimension → 2D arrays
-            x_2d = np.squeeze(cg['boxlib', 'x'].to_ndarray())
-            y_2d = np.squeeze(cg['boxlib', 'y'].to_ndarray())
-            field_2d = np.squeeze(cg[field].to_ndarray())
+                        # Width in x (full domain)
+                        width_perp = domain_right[0] - domain_left[0]
+                        center_x = (domain_left[0] + domain_right[0]) / 2
 
-            # Select plotting coordinates based on slice axis
-            if axis_idx == 2:  # z-normal → plot x-y
-                plot_x, plot_y = x_2d, y_2d
-                xlabel, ylabel = 'X', 'Y'
-            elif axis_idx == 1:  # y-normal → plot x-z
-                z_2d = np.squeeze(cg['boxlib', 'z'].to_ndarray())
-                plot_x, plot_y = x_2d, z_2d
-                xlabel, ylabel = 'X', 'Z'
-            else:  # x-normal → plot y-z
-                z_2d = np.squeeze(cg['boxlib', 'z'].to_ndarray())
-                plot_x, plot_y = y_2d, z_2d
-                xlabel, ylabel = 'Y', 'Z'
+                        plot_center = [center_x, view_center_y, (domain_left[2] + domain_right[2]) / 2]
+                        plot_width = ((width_perp, 'cm'), (width_normal, 'cm'))
 
-            # Compute gradients using uniform grid spacing (dx is same in all directions
-            # for the covering grid at max refinement level)
-            # grad_0 = derivative along array axis 0, grad_1 = along axis 1
-            grad_0, grad_1 = np.gradient(field_2d, dx, dx)
+            elif enable_y_zoom:
+                # Only y-zoom without x bounds
+                width_x = domain_right[0] - domain_left[0]
+                width_y = y_max - y_min
+                center_x = (domain_left[0] + domain_right[0]) / 2
+                center_y = (y_min + y_max) / 2
 
-            # Select gradient component based on mode
-            # For z-normal: axis 0 = x, axis 1 = y, so grad_0 = d/dx, grad_1 = d/dy
-            if mode == SchlierenMode.X:
-                gradient_field = np.abs(grad_0)
-            elif mode == SchlierenMode.Y:
-                gradient_field = np.abs(grad_1)
+                plot_center = [center_x, center_y, (domain_left[2] + domain_right[2]) / 2]
+                plot_width = ((width_x, 'cm'), (width_y, 'cm'))
+
+            # Create SlicePlot with center and width
+            # Use origin='native' to show absolute domain coordinates instead of centered
+            if plot_center is not None and plot_width is not None:
+                slc = yt.SlicePlot(dataset, axis, field_tuple, center=plot_center, width=plot_width, origin='native')
             else:
-                gradient_field = np.sqrt(grad_0 ** 2 + grad_1 ** 2)
+                slc = yt.SlicePlot(dataset, axis, field_tuple, origin='native')
 
-            # Apply knife-edge effect
-            schlieren_2d = self._apply_knife_edge(gradient_field, **kwargs)
+            # Set buffer size for high-resolution output (needed for interpolation to work)
+            slc.set_buff_size(buff_size)
 
-            # Flatten for tricontourf (same as YTFieldPlotter)
-            self._plot_schlieren(
-                plot_x.flatten(), plot_y.flatten(), schlieren_2d.flatten(),
-                output_path, field, mode, xlabel, ylabel
-            )
+            # Set colormap and scaling
+            slc.set_cmap(field_tuple, cmap)
+            slc.set_log(field_tuple, log_scale)
+
+            # Set color limits if provided (disables per-frame normalization)
+            if zmin is not None or zmax is not None:
+                slc.set_zlim(field_tuple, zmin=zmin, zmax=zmax)
+
+            # Set figure properties
+            slc.set_figure_size(self.figure_size[0])
+
+            # Set title
+            mode_labels = {
+                SchlierenMode.X: 'Vertical Knife Edge — d/dx',
+                SchlierenMode.Y: 'Horizontal Knife Edge — d/dy',
+                SchlierenMode.COMBINED: 'Combined |∇|',
+            }
+            title = f'Schlieren ({base_field.value}) — {mode_labels[mode]}'
+            slc.annotate_title(title)
+
+            # Set colorbar label
+            slc.set_colorbar_label(field_tuple, 'Gradient Magnitude')
+
+            # Prepare output path
+            output_path = Path(output_path)
+            output_dir = output_path.parent
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Render and save the plot
+            slc._setup_plots()
+
+            # Set image interpolation if specified (must be after _setup_plots)
+            if interpolation is not None:
+                for field_key in slc.plots:
+                    slc.plots[field_key].image.set_interpolation(interpolation)
+
+            # Save directly with matplotlib to preserve interpolation setting
+            # (YT's save() re-renders and resets interpolation)
+            fig = slc.plots[field_tuple].figure
+            fig.savefig(str(output_path), dpi=self.dpi, bbox_inches='tight')
+            plt.close(fig)
 
         except Exception as e:
             raise PlotGenerationError("schlieren", str(e))
 
-    def _apply_knife_edge(self, gradient_magnitude: np.ndarray,
-                          sensitivity: float = 1.0, cutoff_angle: float = 0.0) -> np.ndarray:
-        """Apply Schlieren knife-edge effect."""
-        max_val = np.nanmax(gradient_magnitude)
-        if max_val == 0 or np.isnan(max_val):
-            return np.zeros_like(gradient_magnitude)
+    def generate_schlieren_pressure_y(
+        self,
+        dataset,
+        output_path: Path,
+        zmin: float = None,
+        zmax: float = None,
+        **kwargs
+    ) -> None:
+        """Convenience method for pressure-based Y-direction Schlieren.
 
-        grad_norm = gradient_magnitude / max_val
-        schlieren = np.tanh(sensitivity * grad_norm)
+        Ideal for tracking transverse waves in detonation simulations.
 
-        if cutoff_angle > 0:
-            schlieren = np.where(grad_norm > cutoff_angle, schlieren, 0)
-
-        return schlieren
-
-    def _plot_schlieren(self, plot_x: np.ndarray, plot_y: np.ndarray,
-                        schlieren_data: np.ndarray, output_path: Path,
-                        field: str, mode: SchlierenMode,
-                        xlabel: str = 'X', ylabel: str = 'Y') -> None:
-        """Create Schlieren plot using tricontourf (same as YTFieldPlotter)."""
-        fig, ax = plt.subplots(figsize=self.figure_size, dpi=self.dpi)
-
-        contour = ax.tricontourf(plot_x, plot_y, schlieren_data,
-                                 levels=50, cmap='gray')
-
-        ax.set_xlabel(f'{xlabel} (cm)')
-        ax.set_ylabel(f'{ylabel} (cm)')
-        ax.set_aspect('equal')
-
-        mode_labels = {
-            SchlierenMode.X: 'Vertical Knife Edge — d/dx',
-            SchlierenMode.Y: 'Horizontal Knife Edge — d/dy',
-            SchlierenMode.COMBINED: 'Combined |∇|',
-        }
-        ax.set_title(f'Schlieren ({field}) — {mode_labels[mode]}')
-
-        plt.colorbar(contour, ax=ax, label='Normalized Gradient')
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
-        plt.close(fig)
+        Args:
+            dataset: YT dataset to visualize.
+            output_path: Path to save the output image.
+            zmin: Minimum value for colorbar (disables per-frame normalization).
+            zmax: Maximum value for colorbar (disables per-frame normalization).
+            **kwargs: Additional arguments passed to generate_schlieren.
+        """
+        self.generate_schlieren(
+            dataset=dataset,
+            output_path=output_path,
+            base_field=SchlierenField.PRESSURE,
+            mode=SchlierenMode.Y,
+            zmin=zmin,
+            zmax=zmax,
+            **kwargs
+        )
 
 
 class StreamlineVisualizer:

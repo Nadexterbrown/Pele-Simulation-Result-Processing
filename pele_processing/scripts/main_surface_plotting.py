@@ -61,18 +61,21 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Data directory containing plt files
 # UPDATE THIS to point to your actual data directory
-DATA_DIR = (_SCRIPT_DIR / "../../pele_data_2d_level_6").resolve()
+DATA_DIR = (_SCRIPT_DIR / "../../pele_data_2d_level_4").resolve()
 
 # Output directory for results
 OUTPUT_DIR = (_SCRIPT_DIR / "../../Processed-MPI-Global-Results-V3.0.0").resolve()
 
+# Cantera mechanism file for calculating derived fields (HRR, sound speed, etc.)
+MECHANISM_FILE = str((_SCRIPT_DIR / "../chemical_mechanisms/LiDryer.yaml").resolve())
+
 # Configuration for tracking and offsets (from main.py)
 EXTRACTION_LOCATION = (0.0462731 + (8.7e-5 / 2)) / 100  # meters - y-location for extraction
-FLAME_TEMPERATURE = 2500.0  # K - temperature threshold for flame detection
+FLAME_TEMPERATURE = 2000.0  # K - temperature threshold for flame detection
 
 # Localized plotting bounds (meters) - for field plots
 FORWARD_BOUND = 5e-4   # 1mm forward of flame
-BACKWARD_BOUND = 1e-4   # 10mm backward of flame
+BACKWARD_BOUND = 25e-4   # 10mm backward of flame
 
 # Additional x-offset from detected flame position (meters)
 X_OFFSET = 0.0
@@ -98,7 +101,7 @@ FIELDS_TO_PLOT = [
 CREATE_FIELD_PLOTS = True  # Set to True to generate individual 2D field plots
 
 # Combined figure generation (1D + 2D plots)
-CREATE_COMBINED_FIGURES = True  # Set to True to generate combined figures for each field
+CREATE_COMBINED_FIGURES = False  # Set to True to generate combined figures for each field
 
 # Combined figure bounds (meters) - separate from field plots
 COMBINED_FORWARD_BOUND = 0.01   # 1mm forward of flame for combined figures
@@ -109,9 +112,14 @@ DATASET_STRIDE = 1  # Process every Nth dataset (1 = process all, 10 = every 10t
 
 # Schlieren visualization configuration
 CREATE_SCHLIEREN = True  # Set to True to generate Schlieren images
+SCHLIEREN_ALL_MODES = False  # Generate all three modes (X, Y, COMBINED) - overrides SCHLIEREN_MODE
 SCHLIEREN_MODE = SchlierenMode.Y  # Y = horizontal knife edge (transverse waves), X = vertical, COMBINED = full gradient
 SCHLIEREN_FIELD = 'pressure'  # Field to compute gradients from (pressure better for transverse waves)
-SCHLIEREN_SENSITIVITY = 1.0  # Sensitivity of knife-edge effect (higher = more contrast)
+SCHLIEREN_LOG_SCALE = False  # Use logarithmic scaling for colorbar (True) or linear (False)
+SCHLIEREN_INTERPOLATION = 'lanczos'  # Image interpolation: None, 'nearest', 'bilinear', 'bicubic', 'gaussian', 'lanczos'
+SCHLIEREN_BUFF_SIZE = 2048  # Resolution of the fixed resolution buffer (higher = more detail for interpolation)
+SCHLIEREN_NORMALIZE_TO_SHOCK = True  # Normalize colorbar based on shock front gradient values
+SCHLIEREN_SHOCK_SAMPLE_WIDTH = 0.05  # Width (cm) around shock to sample for normalization
 
 # ============================================================================
 # END CONFIGURATION
@@ -133,7 +141,7 @@ def get_flame_tracking_position(dataset, extraction_location: float, flame_tempe
     try:
         # Extract 1D field data along X at specific Y location
         unit_converter = create_unit_converter("pele")
-        extractor = create_data_extractor("pele", unit_converter=unit_converter)
+        extractor = create_data_extractor("pele", unit_converter=unit_converter, mechanism_file=MECHANISM_FILE)
         field_data = extractor.extract_ray_data(dataset, extraction_location, Direction.X)
 
         # Find flame position
@@ -175,9 +183,14 @@ def process_single_dataset(
     combined_forward_bound: float = None,
     combined_backward_bound: float = None,
     create_schlieren: bool = False,
+    schlieren_all_modes: bool = False,
     schlieren_mode: SchlierenMode = SchlierenMode.Y,
     schlieren_field: str = 'density',
-    schlieren_sensitivity: float = 1.0
+    schlieren_log_scale: bool = True,
+    schlieren_interpolation: str = None,
+    schlieren_buff_size: int = 2048,
+    schlieren_normalize_to_shock: bool = False,
+    schlieren_shock_sample_width: float = 0.05
 ):
     """
     Process a single dataset - detect flame and create localized plots.
@@ -200,9 +213,14 @@ def process_single_dataset(
         combined_forward_bound: Distance forward of flame (meters) for combined figures
         combined_backward_bound: Distance backward of flame (meters) for combined figures
         create_schlieren: If True, generate Schlieren visualizations
-        schlieren_mode: SchlierenMode controlling knife-edge orientation
-        schlieren_field: Field to compute density gradients from
-        schlieren_sensitivity: Sensitivity of knife-edge effect
+        schlieren_all_modes: Generate all three modes (X, Y, COMBINED)
+        schlieren_mode: SchlierenMode controlling knife-edge orientation (if not all_modes)
+        schlieren_field: Field to compute gradients from ('density' or 'pressure')
+        schlieren_log_scale: Use logarithmic scaling (True) or linear (False)
+        schlieren_interpolation: Image interpolation method ('nearest', 'bilinear', 'bicubic', etc.)
+        schlieren_buff_size: Resolution of the fixed resolution buffer for interpolation
+        schlieren_normalize_to_shock: Normalize colorbar based on shock front gradient values
+        schlieren_shock_sample_width: Width (cm) around shock to sample for normalization
     """
     print(f"\n  Processing: {plt_file.name}")
     print(f"    Time: {dataset.current_time}")
@@ -232,11 +250,19 @@ def process_single_dataset(
     forward_bound_cm = forward_bound * 100
     backward_bound_cm = backward_bound * 100
 
+    # Clamp bounds to domain edges so the view doesn't extend outside the domain
+    if flame_x_cm - backward_bound_cm < left_edge[0]:
+        backward_bound_cm = flame_x_cm - left_edge[0]
+        print(f"    Note: Backward bound clamped to domain left edge ({left_edge[0]:.6f} cm)")
+    if flame_x_cm + forward_bound_cm > right_edge[0]:
+        forward_bound_cm = right_edge[0] - flame_x_cm
+        print(f"    Note: Forward bound clamped to domain right edge ({right_edge[0]:.6f} cm)")
+
     print(f"    Tracking position:")
     print(f"      Flame x: {flame_x_cm:.6f} cm ({flame_x_m:.6f} m)")
     print(f"      Extraction y: {extraction_location:.6f} m")
-    print(f"      Forward bound: {forward_bound:.6f} m")
-    print(f"      Backward bound: {backward_bound:.6f} m")
+    print(f"      Forward bound: {forward_bound_cm / 100:.6f} m ({forward_bound_cm:.6f} cm)")
+    print(f"      Backward bound: {backward_bound_cm / 100:.6f} m ({backward_bound_cm:.6f} cm)")
 
     # Create plotter
     plotter = YTFieldPlotter(figure_size=(10, 8), dpi=150)
@@ -303,8 +329,14 @@ def process_single_dataset(
         combined_fwd_cm = combined_fwd * 100
         combined_bwd_cm = combined_bwd * 100
 
+        # Clamp combined bounds to domain edges
+        if flame_x_cm - combined_bwd_cm < left_edge[0]:
+            combined_bwd_cm = flame_x_cm - left_edge[0]
+        if flame_x_cm + combined_fwd_cm > right_edge[0]:
+            combined_fwd_cm = right_edge[0] - flame_x_cm
+
         print(f"\n    Creating combined figures (1D + 2D) for {len(fields_to_plot)} fields...")
-        print(f"      Combined figure bounds: forward={combined_fwd:.6f} m, backward={combined_bwd:.6f} m")
+        print(f"      Combined figure bounds: forward={combined_fwd_cm / 100:.6f} m, backward={combined_bwd_cm / 100:.6f} m")
         combined_figs_dir = output_base / "Combined-Figures"
 
         try:
@@ -333,33 +365,48 @@ def process_single_dataset(
             SchlierenMode.Y: 'Horizontal Knife Edge (d/dy)',
             SchlierenMode.COMBINED: 'Combined (|grad|)',
         }
-        print(f"\n    Creating Schlieren image — {mode_labels[schlieren_mode]}...")
 
-        schlieren_dir = output_base / "Field-Plots" / "Schlieren"
-        schlieren_dir.mkdir(parents=True, exist_ok=True)
+        # Determine which modes to generate
+        if schlieren_all_modes:
+            modes_to_generate = [SchlierenMode.X, SchlierenMode.Y, SchlierenMode.COMBINED]
+            print(f"\n    Creating Schlieren images — All modes...")
+        else:
+            modes_to_generate = [schlieren_mode]
+            print(f"\n    Creating Schlieren image — {mode_labels[schlieren_mode]}...")
 
-        output_file = schlieren_dir / f"{plt_file.name}_schlieren.png"
+        schlieren_viz = SchlierenVisualizer(figure_size=(12, 10), dpi=300)
 
-        try:
-            schlieren_viz = SchlierenVisualizer(figure_size=(10, 8), dpi=150)
-            schlieren_viz.generate_schlieren(
-                dataset=dataset,
-                output_path=output_file,
-                field=schlieren_field,
-                mode=schlieren_mode,
-                center_point=center_point,
-                forward_bound=forward_bound_cm,
-                backward_bound=backward_bound_cm,
-                axis='z',
-                normal_axis='x',
-                enable_y_zoom=enable_y_zoom,
-                y_min=y_min * 100,
-                y_max=y_max * 100,
-                sensitivity=schlieren_sensitivity
-            )
-            print(f"      [OK] Schlieren saved to: {output_file.name}")
-        except Exception as e:
-            print(f"      [FAILED] Schlieren: {e}")
+        for mode in modes_to_generate:
+            # Create subdirectory for each mode
+            mode_subdir = f"Schlieren-{mode.value.upper()}"
+            schlieren_dir = output_base / "Field-Plots" / mode_subdir
+            schlieren_dir.mkdir(parents=True, exist_ok=True)
+
+            output_file = schlieren_dir / f"{plt_file.name}_schlieren_{mode.value}.png"
+
+            try:
+                schlieren_viz.generate_schlieren(
+                    dataset=dataset,
+                    output_path=output_file,
+                    base_field=schlieren_field,
+                    mode=mode,
+                    center_point=center_point,
+                    forward_bound=forward_bound_cm,
+                    backward_bound=backward_bound_cm,
+                    axis='z',
+                    normal_axis='x',
+                    enable_y_zoom=enable_y_zoom,
+                    y_min=y_min * 100,
+                    y_max=y_max * 100,
+                    log_scale=schlieren_log_scale,
+                    interpolation=schlieren_interpolation,
+                    buff_size=schlieren_buff_size,
+                    normalize_to_shock=schlieren_normalize_to_shock,
+                    shock_sample_width=schlieren_shock_sample_width,
+                )
+                print(f"      [OK] Schlieren ({mode.value}): {output_file.name}")
+            except Exception as e:
+                print(f"      [FAILED] Schlieren ({mode.value}): {e}")
 
 
 def generate_mp4_animations(output_dir: Path, fields_to_plot: List[Dict],
@@ -497,9 +544,17 @@ def main():
                     SchlierenMode.COMBINED: 'Combined (|grad|)',
                 }
                 print(f"    Schlieren: ENABLED")
-                print(f"    Mode: {mode_labels[SCHLIEREN_MODE]}")
+                if SCHLIEREN_ALL_MODES:
+                    print(f"    Mode: ALL (X, Y, COMBINED)")
+                else:
+                    print(f"    Mode: {mode_labels[SCHLIEREN_MODE]}")
                 print(f"    Field: {SCHLIEREN_FIELD}")
-                print(f"    Sensitivity: {SCHLIEREN_SENSITIVITY}")
+                print(f"    Log Scale: {SCHLIEREN_LOG_SCALE}")
+                print(f"    Interpolation: {SCHLIEREN_INTERPOLATION}")
+                print(f"    Buffer Size: {SCHLIEREN_BUFF_SIZE}")
+                print(f"    Normalize to Shock: {SCHLIEREN_NORMALIZE_TO_SHOCK}")
+                if SCHLIEREN_NORMALIZE_TO_SHOCK:
+                    print(f"    Shock Sample Width: {SCHLIEREN_SHOCK_SAMPLE_WIDTH} cm")
             else:
                 print(f"    Schlieren: DISABLED")
             print(f"\n  Fields to plot:")
@@ -591,9 +646,14 @@ def main():
                     combined_forward_bound=COMBINED_FORWARD_BOUND,
                     combined_backward_bound=COMBINED_BACKWARD_BOUND,
                     create_schlieren=CREATE_SCHLIEREN,
+                    schlieren_all_modes=SCHLIEREN_ALL_MODES,
                     schlieren_mode=SCHLIEREN_MODE,
                     schlieren_field=SCHLIEREN_FIELD,
-                    schlieren_sensitivity=SCHLIEREN_SENSITIVITY
+                    schlieren_log_scale=SCHLIEREN_LOG_SCALE,
+                    schlieren_interpolation=SCHLIEREN_INTERPOLATION,
+                    schlieren_buff_size=SCHLIEREN_BUFF_SIZE,
+                    schlieren_normalize_to_shock=SCHLIEREN_NORMALIZE_TO_SHOCK,
+                    schlieren_shock_sample_width=SCHLIEREN_SHOCK_SAMPLE_WIDTH
                 )
 
                 success_count += 1
